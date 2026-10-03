@@ -154,6 +154,22 @@ def center_window(win, w=None, h=None, parent=None):
     y = max(0, min(y, sh - h - 40))      # keep clear of the taskbar
     win.geometry(f"{w}x{h}+{x}+{y}")
 
+def style_titlebar(win, bg=OCEAN, fg=WHITE):
+    try:
+        import ctypes
+        win.update_idletasks()
+        hwnd = ctypes.windll.user32.GetParent(win.winfo_id())
+ 
+        def bgr(h):
+            h = h.lstrip("#")
+            r, g, b = (int(h[i:i + 2], 16) for i in (0, 2, 4))
+            return ctypes.c_int(r | (g << 8) | (b << 16))
+ 
+        for attr, col in ((35, bg), (36, fg), (34, bg)):   # caption, text, border
+            c = bgr(col)
+            ctypes.windll.dwmapi.DwmSetWindowAttribute(hwnd, attr, ctypes.byref(c), ctypes.sizeof(c))
+    except Exception:
+        pass
 
 # ============================================================ pictures
 THEMES = {  # sky top, sky bottom, sea, sand
@@ -349,6 +365,15 @@ def init_db():
                          "VALUES(?,?,?,?,?,?,?)", (num, t, cap, rate, desc, am, os.path.basename(p)))
         conn.commit()
 
+    try:
+        conn.execute("ALTER TABLE bookings ADD COLUMN actual_out TEXT")
+        conn.commit()
+    except sqlite3.OperationalError:
+        pass                                   # column already exists
+    conn.execute("UPDATE bookings SET actual_out=? WHERE status='Checked-out' "
+                 "AND actual_out IS NULL AND check_out>?", (today().isoformat(), today().isoformat()))
+    conn.commit()
+
 
 BOOKING_SQL = """
 SELECT b.*, g.name AS guest, g.phone AS phone, r.number AS room_no, r.name AS room_type,
@@ -432,9 +457,9 @@ def recalc_booking(bid):
 
 def occupied_count(day, statuses=("Reserved", "Checked-in", "Checked-out")):
     ph = ",".join("?" * len(statuses))
-    return q1(f"SELECT COUNT(*) FROM bookings WHERE status IN ({ph}) AND check_in<=? AND check_out>?",
+    return q1(f"SELECT COUNT(*) FROM bookings WHERE status IN ({ph}) AND check_in<=? "
+              "AND COALESCE(actual_out, check_out)>?",
               (*statuses, day.isoformat(), day.isoformat()))[0]
-
 
 def active_rooms():
     return max(1, q1("SELECT COUNT(*) FROM rooms WHERE status='Active'")[0])
@@ -791,7 +816,7 @@ class ScrollFrame(tk.Frame):
     def __init__(self, parent, bg=WHITE):
         super().__init__(parent, bg=bg)
         self.canvas = tk.Canvas(self, bg=bg, highlightthickness=0, bd=0)
-        sb = ttk.Scrollbar(self, orient="vertical", command=self.canvas.yview)
+        self.sb = sb = ttk.Scrollbar(self, orient="vertical", command=self.canvas.yview)
         self.inner = tk.Frame(self.canvas, bg=bg)
         self.inner.bind("<Configure>", lambda e: self.canvas.configure(scrollregion=self.canvas.bbox("all")))
         self.win = self.canvas.create_window((0, 0), window=self.inner, anchor="nw")
@@ -828,7 +853,7 @@ class DateEntry(tk.Frame):
         self.min_date = min_date
         self.var = tk.StringVar(value=value or today().isoformat())
         e = ttk.Entry(self, textvariable=self.var, width=11)
-        e.pack(side="left")
+        e.pack(side="left", fill="x", expand=True)
         if on_change:
             e.bind("<KeyRelease>", lambda ev: on_change())
         tk.Button(self, text="📅", relief="flat", bg=bg, bd=0, cursor="hand2", activebackground=bg,
@@ -956,7 +981,7 @@ class Dialog(tk.Toplevel):
         self.configure(bg=WHITE)
         self.transient(parent.winfo_toplevel())
         self.resizable(False, False)
-        self.body = tk.Frame(self, bg=WHITE, padx=26, pady=22)
+        self.body = tk.Frame(self, bg=WHITE, padx=20, pady=16)    # was 26 / 22
         self.body.pack(fill="both", expand=True)
         self.result = False
         self.dlg_size = None
@@ -969,6 +994,7 @@ class Dialog(tk.Toplevel):
         w, h = self.dlg_size or (None, None)
         center_window(self, w, h, self.master.winfo_toplevel())
         self.deiconify()
+        style_titlebar(self)
         self.lift()
         self.focus_force()
         self.after(30, self._grab)
@@ -979,6 +1005,88 @@ class Dialog(tk.Toplevel):
         except tk.TclError:
             pass
 
+def form_grid(parent):
+    """Two equal columns. Fill it with grid_entry() / grid_cell()."""
+    g = tk.Frame(parent, bg=WHITE)
+    g.pack(fill="x")
+    g.grid_columnconfigure((0, 1), weight=1, uniform="fg")
+    return g
+ 
+ 
+def grid_cell(g, row, col, label, span=1):
+    """A labelled slot in the form grid. Returns the frame to put your widget in."""
+    px = (0, 0) if span == 2 else ((0, 6) if col == 0 else (6, 0))
+    cell = tk.Frame(g, bg=WHITE)
+    cell.grid(row=row, column=col, columnspan=span, sticky="ew", padx=px, pady=(0, 10))
+    tk.Label(cell, text=label, bg=WHITE, fg=MUTED, font=(F, 9), anchor="w").pack(fill="x", pady=(0, 3))
+    return cell
+ 
+ 
+def grid_entry(g, row, col, label, value="", span=1, show=None):
+    cell = grid_cell(g, row, col, label, span)
+    e = ttk.Entry(cell, show=show or "")
+    e.pack(fill="x")
+    if value not in (None, ""):
+        e.insert(0, str(value))
+    return e
+ 
+ 
+def hint(parent, text):
+    """Small grey helper text under a field (pass entry.master to put it under that entry)."""
+    tk.Label(parent, text=text, bg=WHITE, fg=MUTED, font=(F, 8), anchor="w").pack(fill="x", pady=(2, 0))
+ 
+ 
+class FormDialog(Dialog):
+    """Base for input pop-ups: icon header, rounded section cards, Cancel / Save footer.
+    Usage:  super().__init__(parent, title, icon, heading, sub)
+            p = self.panel("Section name") ... build fields ...
+            self.footer("Save", self.save, left=("Delete", self.delete))   # left= is optional
+            self.finish()                                                   # always last"""
+    W = 460
+ 
+    def __init__(self, parent, title, icon, heading, sub="", tint=None, fg=TEAL, width=None):
+        super().__init__(parent, title)
+        self.configure(bg=BG)
+        self.body.configure(bg=BG, padx=18, pady=16)
+        self._cards = []
+        tk.Frame(self.body, bg=BG, width=width or self.W, height=1).pack()      # minimum width
+ 
+        head = tk.Frame(self.body, bg=BG)
+        head.pack(fill="x", pady=(0, 12))
+        avatar(head, icon, 44, tint or TINT["teal"], fg, bg=BG, font=(F, 16), dy=-1).pack(side="left")
+        t = tk.Frame(head, bg=BG)
+        t.pack(side="left", padx=12)
+        tk.Label(t, text=heading, font=(F, 16, "bold"), bg=BG, fg=INK).pack(anchor="w")
+        if sub:
+            tk.Label(t, text=sub, font=(F, 9), bg=BG, fg=MUTED).pack(anchor="w")
+ 
+    def panel(self, title=None):
+        c = Card(self.body, fit=True, pad=14, radius=16)
+        c.pack(fill="x", pady=(0, 10))
+        self._cards.append(c)
+        if title:
+            tk.Label(c.body, text=title.upper(), font=(F, 8, "bold"), bg=WHITE, fg=MUTED).pack(anchor="w", pady=(0, 8))
+        return c.body
+ 
+    def footer(self, yes_text, yes_cmd, left=None):
+        row = tk.Frame(self.body, bg=BG)
+        row.pack(fill="x", pady=(2, 0))
+        items = []
+        if left:
+            items.append((left[0], left[1], "#FCEDEA", DANGER, 1))       # soft red (Delete)
+        items.append(("Cancel", self.destroy, TINT["ocean"], INK, 1))
+        items.append((yes_text, yes_cmd, TEAL, WHITE, 2))
+        for i, (text, cmd, col, fg, w) in enumerate(items):
+            row.grid_columnconfigure(i, weight=w, uniform="fb")
+            btn(row, text, cmd, col, fg, height=40).grid(
+                row=0, column=i, sticky="ew",
+                padx=(0 if i == 0 else 4, 0 if i == len(items) - 1 else 4))
+        self.bind("<Return>", lambda e: yes_cmd())
+ 
+    def finish(self):
+        """Measure the cards so the pop-up opens at the right height."""
+        for c in self._cards:
+            c._fit()
 
 # ============================================================ invoice
 def invoice_text(bid):
@@ -1055,6 +1163,7 @@ def setup_style(root):
         s.configure(name, fieldbackground=WHITE, foreground=INK, bordercolor="#D3DEE0", lightcolor="#D3DEE0",
                     darkcolor="#D3DEE0", padding=7, insertcolor=INK)
         s.map(name, bordercolor=[("focus", TEAL)], lightcolor=[("focus", TEAL)], darkcolor=[("focus", TEAL)])
+    s.map("TEntry", fieldbackground=[("disabled", "#EEF3F4")], foreground=[("disabled", MUTED)])
     s.configure("TCombobox", fieldbackground=WHITE, background=WHITE, foreground=INK, bordercolor="#D3DEE0",
                 lightcolor="#D3DEE0", darkcolor="#D3DEE0", arrowcolor=MUTED, padding=6)
     s.map("TCombobox", fieldbackground=[("readonly", WHITE)], foreground=[("readonly", INK)],
@@ -1383,6 +1492,7 @@ class BookingPage(Page):
         self.ci = self.co = None
         self.promo_pct, self.promo_code, self.touched = 0, "", False
 
+
         self.body = tk.Frame(self, bg=BG)
         self.body.pack(fill="both", expand=True, padx=26, pady=(20, 18))
 
@@ -1481,6 +1591,10 @@ class BookingPage(Page):
         self.promo = ttk.Entry(pr)
         self.promo.pack(side="left", fill="x", expand=True)
         btn(pr, "Apply", self.apply_promo, TEAL, height=34).pack(side="left", padx=(8, 0))
+        self.promo_msg = tk.Label(p, text="", bg=WHITE, font=(F, 9), anchor="w")
+        self.promo_msg.pack(fill="x", pady=(0, 6))
+        self.promo.bind("<KeyRelease>", self.promo_edited)
+
         tk.Label(p, text="Deposit now (₱)", bg=WHITE, fg=MUTED, font=(F, 9)).pack(anchor="w")
         self.dep = ttk.Entry(p)
         self.dep.pack(fill="x", pady=(2, 8))
@@ -1570,6 +1684,7 @@ class BookingPage(Page):
             if msg:
                 self.promo_pct, self.promo_code = 0, ""
                 self.promo.delete(0, "end")
+                self.set_promo_msg(msg)
                 if not silent:
                     messagebox.showinfo("Promo removed", msg, parent=self)
             else:
@@ -1657,22 +1772,37 @@ class BookingPage(Page):
                 out.append((a["name"], n, a["price"]))
         return out
 
+    def set_promo_msg(self, text, ok=False):
+        self.promo_msg.config(text=text, fg=TEAL if ok else DANGER)
+
+    def promo_edited(self, _=None):
+        """Typing in the box removes any applied discount until Apply is clicked again."""
+        if self.promo.get().strip().upper() != self.promo_code:
+            self.promo_pct, self.promo_code = 0, ""
+            self.promo_msg.config(text="")
+            self.summary()
+
     def apply_promo(self):
+        """Returns True if the box is empty or the code is valid and applied."""
         code = self.promo.get().strip().upper()
         if not code:
             self.promo_pct, self.promo_code = 0, ""
+            self.promo_msg.config(text="")
         elif not self.ci:
-            messagebox.showinfo("Promo", "Search for rooms first, then apply the promo code.", parent=self)
-            return
+            self.set_promo_msg("Pick valid dates first, then apply the code.")
+            return False
         else:
             pct, msg = check_promo(code, (self.co - self.ci).days)
             if msg:
                 self.promo_pct, self.promo_code = 0, ""
-                messagebox.showwarning("Promo code", msg, parent=self)
-            else:
-                self.promo_pct, self.promo_code = pct, code
-                messagebox.showinfo("Promo applied", f"{code}: {pct:g}% off", parent=self)
+                self.promo.delete(0, "end")          # don't leave a dead code in the box
+                self.set_promo_msg(msg)
+                self.summary()
+                return False
+            self.promo_pct, self.promo_code = pct, code
+            self.set_promo_msg(f"✔ {code}: {pct:g}% off", True)
         self.summary()
+        return True
 
     def summary(self):
         if not self.sel_room or not self.ci:
@@ -1715,6 +1845,10 @@ class BookingPage(Page):
         if not name or not phone:
             messagebox.showwarning("Guest", "Guest name and phone are required.", parent=self)
             return
+        if self.promo.get().strip().upper() != self.promo_code:     # typed but not applied
+            if not self.apply_promo():
+                messagebox.showwarning("Promo code", self.promo_msg.cget("text") or "Invalid promo code.", parent=self)
+                return
         if self.promo_code:
             pct, msg = check_promo(self.promo_code, (self.co - self.ci).days)
             if msg:
@@ -1763,46 +1897,54 @@ class BookingPage(Page):
 
 
 # ------------------------------------------------------------ rooms
-class RoomDialog(Dialog):
+class RoomDialog(FormDialog):
     def __init__(self, page, room=None):
-        super().__init__(page, "Edit Room" if room else "Add Room")
-        self.page, self.room = page, room
-        b = self.body
         r = room
-        tk.Label(b, text="Edit room" if room else "Add a room", font=(F, 14, "bold"), bg=WHITE, fg=INK).pack(anchor="w", pady=(0, 10))
-        self.num = lbl_entry(b, "Room number", r["number"] if r else "")
-        tk.Label(b, text="Room type", bg=WHITE, fg=MUTED, anchor="w", font=(F, 9)).pack(fill="x")
-        types = [x["name"] for x in q("SELECT DISTINCT name FROM rooms")]
-        self.type = ttk.Combobox(b, values=types)
+        super().__init__(page, "Edit Room" if r else "Add Room", "🛏",
+                         "Edit room" if r else "Add a room",
+                         f"Room {r['number']} • {r['name']}" if r else "Add a new room or villa to the resort")
+        self.page, self.room = page, room
+ 
+        p = self.panel("Details")
+        g = form_grid(p)
+        self.num = grid_entry(g, 0, 0, "Room number", r["number"] if r else "")
+        cell = grid_cell(g, 0, 1, "Room type")
+        types = [x["name"] for x in q("SELECT DISTINCT name FROM rooms ORDER BY name")]
+        self.type = ttk.Combobox(cell, values=types)
         self.type.set(r["name"] if r else "")
-        self.type.pack(fill="x", pady=(2, 9))
-        self.cap = lbl_entry(b, "Capacity (guests)", r["capacity"] if r else "2")
-        self.rate = lbl_entry(b, "Rate per night (₱)", r["rate"] if r else "")
-        self.desc = lbl_entry(b, "Description", r["description"] if r else "", width=50)
-        self.am = lbl_entry(b, "Amenities", r["amenities"] if r else "")
-        tk.Label(b, text="Status", bg=WHITE, fg=MUTED, anchor="w", font=(F, 9)).pack(fill="x")
-        self.status = ttk.Combobox(b, values=["Active", "Maintenance"], state="readonly")
-        self.status.set(r["status"] if r else "Active")
-        self.status.pack(fill="x", pady=(2, 9))
+        self.type.pack(fill="x")
+ 
+        cell = grid_cell(g, 1, 0, "Capacity (guests)")
+        cap = int(r["capacity"]) if r else 2
+        self.cap = Stepper(cell, cap, 1, max(20, cap))
+        self.cap.pack(anchor="w")
+        self.rate = grid_entry(g, 1, 1, "Rate per night (₱)", f"{r['rate']:.2f}" if r else "")
+        self.desc = grid_entry(g, 2, 0, "Description", r["description"] if r else "", span=2)
+        self.am = grid_entry(g, 3, 0, "Amenities", r["amenities"] if r else "", span=2)
+        hint(self.am.master, "Separate items with  •   e.g. Aircon • WiFi • Balcony")
+        cell = grid_cell(g, 4, 0, "Status", span=2)
+        self.status = Segmented(cell, ["Active", "Maintenance"], r["status"] if r else "Active")
+        self.status.pack(fill="x")
+ 
+        p2 = self.panel("Picture")
+        row = tk.Frame(p2, bg=WHITE)
+        row.pack(fill="x")
         self.image = r["image"] if r else ""
         self._prev = None
-        btn(b, "Choose picture...", self.pick, OCEAN).pack(fill="x", pady=4)
-        pic = tk.Frame(b, bg=WHITE)
-        pic.pack(fill="x", pady=(2, 0))
-        self.prev = tk.Label(pic, bg=BG, fg=MUTED, font=(F, 8), width=20, height=6, text="No picture yet")
+        self.prev = tk.Label(row, bg=BG, fg=MUTED, font=(F, 8), width=20, height=6, text="No picture yet")
         self.prev.pack(side="left")
-        self.pic_lbl = tk.Label(pic, bg=WHITE, fg=MUTED, font=(F, 9), anchor="w", justify="left", wraplength=190)
-        self.pic_lbl.pack(side="left", padx=10, fill="x", expand=True)
+        side = tk.Frame(row, bg=WHITE)
+        side.pack(side="left", fill="x", expand=True, padx=14)
+        self.pic_lbl = tk.Label(side, bg=WHITE, fg=MUTED, font=(F, 9), anchor="w", justify="left", wraplength=230)
+        self.pic_lbl.pack(fill="x", pady=(0, 8))
+        btn(side, "Choose picture…", self.pick, TINT["ocean"], INK, height=34).pack(anchor="w")
         self.show_pic(f"Current: {r['image']}" if (r and r["image"]) else "No picture selected")
-        row = tk.Frame(b, bg=WHITE)
-        row.pack(fill="x", pady=(12, 0))
-        btn(row, "Save", self.save, TEAL).pack(side="left")
-        if r:
-            btn(row, "Delete", self.delete, CORAL).pack(side="left", padx=8)
-        btn(row, "Cancel", self.destroy, "#9FB4BC").pack(side="right")
-
+ 
+        self.footer("Save room", self.save, left=("Delete", self.delete) if r else None)
+        self.finish()
+ 
     def show_pic(self, text, good=False):
-        """Update the preview thumbnail and the status text under 'Choose picture...'."""
+        """Update the preview thumbnail and the status text next to 'Choose picture'."""
         p = img_path(self.image) if self.image else ""
         if p and os.path.exists(p):
             self._prev = load_photo(p, (150, 96), 10)      # keep a reference on self!
@@ -1812,7 +1954,7 @@ class RoomDialog(Dialog):
             self.prev.config(image="", text="No picture yet", width=20, height=6)
         self.pic_lbl.config(text=text, fg=TEAL if good else MUTED,
                             font=(F, 9, "bold") if good else (F, 9))
-        
+ 
     def pick(self):
         f = filedialog.askopenfilename(parent=self, filetypes=[("Images", "*.png *.jpg *.jpeg *.bmp *.gif")])
         if f:
@@ -1820,8 +1962,11 @@ class RoomDialog(Dialog):
             shutil.copy(f, os.path.join(IMG_DIR, name))
             self.image = name
             self.show_pic(f"✔ Uploaded: {os.path.basename(f)}\nClick Save to apply it.", good=True)
-
+ 
     def save(self):
+        if (self.room and self.status.get() == "Maintenance" and self.room["status"] != "Maintenance"
+                and not can_set_maintenance(self, self.room["id"])):
+            return
         try:
             vals = (self.num.get().strip(), self.type.get().strip(), int(self.cap.get()),
                     float(self.rate.get()), self.desc.get().strip(), self.am.get().strip())
@@ -1848,12 +1993,13 @@ class RoomDialog(Dialog):
             return
         self.destroy()
         self.page.refresh()
-
+ 
     def delete(self):
         if q1("SELECT 1 FROM bookings WHERE room_id=?", (self.room["id"],)):
             messagebox.showwarning("In use", "This room has booking history. Set it to Maintenance instead.", parent=self)
             return
-        if messagebox.askyesno("Delete", "Delete this room?", parent=self):
+        if confirm_delete(self, "room", f"Delete Room {self.room['number']} ({self.room['name']})? "
+                                        "This action cannot be undone."):
             ex("DELETE FROM rooms WHERE id=?", (self.room["id"],))
             self.destroy()
             self.page.refresh()
@@ -1889,11 +2035,61 @@ class ConfirmDialog(Dialog):
     def _yes(self):
         self.result = True
         self.destroy()
+        
 def confirm(parent, title, message, **kw):
     """Drop-in replacement for messagebox.askyesno. Returns True / False."""
     d = ConfirmDialog(parent, title, message, **kw)
     d.wait_window()
     return d.result
+
+
+def confirm_delete(parent, what, message="This action cannot be undone.", detail=""):
+    """Red, styled delete confirmation. Returns True / False."""
+    return confirm(parent, f"Delete {what}?", message, yes="Delete", no="Cancel",
+                   icon="🗑", danger=True, detail=detail)
+
+class AlertDialog(Dialog):
+    """Styled one-button message: warning / error / info / success."""
+    KINDS = {   # icon, icon colour, circle tint, button colour
+        "warning": ("⚠", "#9A6B00", "#FFF1CC", GOLD),
+        "error":   ("✖", DANGER,    "#FCEDEA", DANGER),
+        "info":    ("ℹ", TEAL,      TINT["teal"], TEAL),
+        "success": ("✔", TEAL,      TINT["teal"], TEAL),
+    }
+
+    def __init__(self, parent, title, message, kind="warning", button="OK"):
+        super().__init__(parent, title)
+        icon, icon_fg, tint, btn_col = self.KINDS[kind]
+        b = self.body
+        b.configure(padx=30, pady=26)
+        tk.Frame(b, bg=WHITE, width=360, height=1).pack()        # minimum width only
+        avatar(b, icon, 56, tint, icon_fg, bg=WHITE, font=(F, 20), dy=0).pack(pady=(0, 12))
+        tk.Label(b, text=title, font=(F, 15, "bold"), bg=WHITE, fg=INK).pack()
+        tk.Label(b, text=message, font=(F, 10), bg=WHITE, fg=MUTED,
+                 wraplength=340, justify="center").pack(pady=(6, 0))
+        btn(b, button, self.destroy, btn_col, WHITE, height=40).pack(fill="x", pady=(20, 0))
+        self.bind("<Return>", lambda e: self.destroy())
+
+
+def _alert(kind):
+    def show(title, message, **kw):
+        parent = kw.get("parent") or tk._default_root
+        k = "success" if (kind == "info" and title in ("Saved", "Copied", "Promo applied")) else kind
+        AlertDialog(parent, title, message, k).wait_window()
+        return "ok"
+    return show
+
+
+def _ask_yes_no(title, message, **kw):
+    parent = kw.get("parent") or tk._default_root
+    return confirm(parent, title, message, yes="Yes", no="Cancel", icon="❓")
+
+
+# replace the plain Windows pop-ups everywhere in the app
+messagebox.showwarning = _alert("warning")
+messagebox.showerror = _alert("error")
+messagebox.showinfo = _alert("info")
+messagebox.askyesno = _ask_yes_no   
 
 def room_state(r):
     if r["status"] == "Maintenance":
@@ -1907,6 +2103,28 @@ def room_state(r):
         return "Booked tonight", GOLD
     return "Available", AQUA
 
+def can_set_maintenance(parent, room_id):
+    """Guard before switching a room to Maintenance. Returns True if it's OK to proceed."""
+    inhouse = q1(BOOKING_SQL + " WHERE b.room_id=? AND b.status='Checked-in'", (room_id,))
+    if inhouse:
+        messagebox.showwarning(
+            "Guest in room",
+            f"{inhouse['guest']} is checked in (until {inhouse['check_out']}).\n"
+            "Check them out or move them to another room first.", parent=parent)
+        return False
+    upcoming = q(BOOKING_SQL + " WHERE b.room_id=? AND b.status='Reserved' AND b.check_out>? "
+                 "ORDER BY b.check_in", (room_id, today().isoformat()))
+    if not upcoming:
+        return True
+    lines = [f"{ref(b['id'])}  {b['check_in']} → {b['check_out']}  {b['guest'][:16]}"
+             for b in upcoming[:6]]
+    if len(upcoming) > 6:
+        lines.append(f"... and {len(upcoming) - 6} more")
+    return confirm(parent, "Room has reservations",
+                   f"{len(upcoming)} upcoming reservation(s) use this room. They will stay, but "
+                   "check-in will be blocked until you move those guests to another room.",
+                   yes="Set maintenance", no="Cancel", icon="🔧", danger=True,
+                   detail="\n".join(lines))
 
 class RoomsPage(Page):
     def __init__(self, app):
@@ -1988,6 +2206,8 @@ class BookingsPage(Page):
             btn(bt, text, cmd, col, INK if col == GOLD else WHITE, height=36, padx=12).pack(side="left", padx=(0, 8))
 
     def load(self):
+        keep = self.tree.selection()
+        top = self.tree.yview()[0]
         self.tree.delete(*self.tree.get_children())
         s = f"%{self.s.get().strip()}%"
         sql = BOOKING_SQL + (" WHERE (g.name LIKE ? OR g.phone LIKE ? OR r.number LIKE ? "
@@ -2002,6 +2222,12 @@ class BookingsPage(Page):
                              values=(ref(b["id"]), b["guest"], f"{b['room_no']} {b['room_type']}",
                                      b["check_in"], b["check_out"], n, money(b["total"]), money(b["paid"]),
                                      money(b["total"] - b["paid"]), b["status"]))
+        self.tree.resort()                       # re-apply the user's sort
+        self.tree.yview_moveto(top)
+        for iid in keep:
+            if self.tree.exists(iid):
+                self.tree.selection_set(iid)
+                self.tree.see(iid)
 
     refresh = load
 
@@ -2039,11 +2265,39 @@ class BookingsPage(Page):
         if room["status"] == "Maintenance":
             messagebox.showwarning("Room", "That room is under maintenance. Move the guest to another room.")
             return
-        if pdate(b["check_in"]) > today() and not messagebox.askyesno(
-                "Early check-in", f"Arrival date is {b['check_in']}. Check in early?"):
+        occupant = q1(BOOKING_SQL + " WHERE b.room_id=? AND b.status='Checked-in' AND b.id!=?",
+                      (b["room_id"], bid))
+        if occupant:
+            messagebox.showwarning(
+                "Room still occupied",
+                f"{occupant['guest']} is still checked in to Room {room['number']} "
+                f"(departs {occupant['check_out']}).\n"
+                "Check them out first, or move this guest to another room.", parent=self)
             return
-        if room["hk"] != "Clean" and not messagebox.askyesno(
-                "Housekeeping", f"Room {room['number']} is marked '{room['hk']}'. Check in anyway?"):
+        
+        # collect warnings (shown inside the same dialog)
+        warns = []
+        early = (pdate(b["check_in"]) - today()).days
+        if early > 0:
+            warns.append(f"Early arrival: booked for {b['check_in']} ({early} day{'s' if early != 1 else ''} early).")
+        if room["hk"] != "Clean":
+            warns.append(f"Room {room['number']} is marked '{room['hk']}', not Clean.")
+
+        bal = b["total"] - b["paid"]
+        detail = (f"{'Guest':<9}{b['guest'][:24]}\n"
+                  f"{'Room':<9}{b['room_no']} {b['room_type']}\n"
+                  f"{'Stay':<9}{b['check_in']} → {b['check_out']}\n"
+                  f"{'Guests':<9}{b['adults']} adult(s), {b['children']} child(ren)\n"
+                  f"{'Balance':<9}{money(max(bal, 0))}")
+
+        if warns:
+            msg = "\n".join("⚠ " + w for w in warns) + "\n\nCheck in anyway?"
+        else:
+            msg = "The guest will be marked as in-house."
+
+        if not confirm(self, "Check in guest?", msg,
+                       yes="Check in anyway" if warns else "Check in",
+                       no="Cancel", icon="🔑", detail=detail):
             return
         ex("UPDATE bookings SET status='Checked-in' WHERE id=?", (bid,))
         self.load()
@@ -2057,12 +2311,29 @@ class BookingsPage(Page):
             messagebox.showinfo("Check-out", "Only checked-in guests can be checked out.")
             return
         bal = b["total"] - b["paid"]
-        if bal > 0.009:
-            if not messagebox.askyesno("Balance due", f"Outstanding balance: {money(bal)}\nCollect payment now?"):
-                return
-            if not PaymentDialog(self, bid, bal).ok():
-                return
-        ex("UPDATE bookings SET status='Checked-out' WHERE id=?", (bid,))
+        owes = bal > 0.009
+        left_early = today() < pdate(b["check_out"])
+        detail = (f"{'Guest':<9}{b['guest'][:24]}\n"
+                  f"{'Room':<9}{b['room_no']} {b['room_type']}\n"
+                  f"{'Total':<9}{money(b['total'])}\n"
+                  f"{'Paid':<9}{money(b['paid'])}\n"
+                  f"{'Balance':<9}{money(max(bal, 0))}")
+        msg = ("There is an outstanding balance. You'll be asked to collect payment next."
+               if owes else "The room will be marked Dirty and the invoice will open.")
+        if left_early:
+            msg = (f"Early departure: booked until {b['check_out']}. The room is released from today, "
+                   "but the full stay stays billed.\n\n") + msg
+        if not confirm(self, "Check out guest?", msg,
+                       yes="Collect & check out" if owes else "Check out",
+                       no="Cancel", icon="🚪", detail=detail):
+            return
+        if owes and not PaymentDialog(self, bid, bal).ok():
+            return
+        if left_early:
+            ex("UPDATE bookings SET status='Checked-out', actual_out=? WHERE id=?",
+               (today().isoformat(), bid))
+        else:
+            ex("UPDATE bookings SET status='Checked-out' WHERE id=?", (bid,))
         ex("UPDATE rooms SET hk='Dirty' WHERE id=?", (b["room_id"],))
         self.load()
         show_invoice(self.app, bid)
@@ -2074,8 +2345,8 @@ class BookingsPage(Page):
             if b["status"] == "Cancelled":
                 messagebox.showinfo("Payment", "This booking is cancelled.")
                 return
-            PaymentDialog(self, bid, max(0, b["total"] - b["paid"])).ok()
-            self.load()
+            if PaymentDialog(self, bid, max(0, b["total"] - b["paid"])).ok():
+                self.load()
 
     def charge(self, bid=None):
         bid = bid or self.sel()
@@ -2084,8 +2355,8 @@ class BookingsPage(Page):
             if b["status"] in ("Cancelled", "Checked-out"):
                 messagebox.showinfo("Charge", "Cannot add charges to this booking.")
                 return
-            ChargeDialog(self, bid)
-            self.load()
+            if ChargeDialog(self, bid).result:
+                self.load()
 
     def dates(self, bid=None):
         bid = bid or self.sel()
@@ -2094,8 +2365,8 @@ class BookingsPage(Page):
             if b["status"] not in ("Reserved", "Checked-in"):
                 messagebox.showinfo("Dates", "Only active bookings can be changed.")
                 return
-            DatesDialog(self, b)
-            self.load()
+            if DatesDialog(self, b).result:
+                self.load()
 
     def move(self, bid=None):
         bid = bid or self.sel()
@@ -2104,8 +2375,8 @@ class BookingsPage(Page):
             if b["status"] not in ("Reserved", "Checked-in"):
                 messagebox.showinfo("Move", "Only active bookings can be moved.")
                 return
-            MoveDialog(self, b)
-            self.load()
+            if MoveDialog(self, b).result:
+                self.load()
 
     def invoice(self, bid=None):
         bid = bid or self.sel()
@@ -2134,18 +2405,83 @@ class BookingsPage(Page):
             ex("UPDATE bookings SET status='Cancelled', total=? WHERE id=?", (penalty, bid))
             self.load()
 
+def dialog_header(parent, icon, title, sub="", tint=None, fg=TEAL, dy=-2):
+    row = tk.Frame(parent, bg=WHITE)
+    row.pack(fill="x", pady=(0, 10))
+    avatar(row, icon, 38, tint or TINT["teal"], fg, bg=WHITE, font=(F, 14), dy=dy).pack(side="left")
+    t = tk.Frame(row, bg=WHITE)
+    t.pack(side="left", padx=10)
+    tk.Label(t, text=title, font=(F, 13, "bold"), bg=WHITE, fg=INK).pack(anchor="w")
+    if sub:
+        tk.Label(t, text=sub, font=(F, 9), bg=WHITE, fg=MUTED).pack(anchor="w")
+
+
+def dialog_buttons(parent, yes_text, yes_cmd, no_cmd, color=TEAL):
+    row = tk.Frame(parent, bg=WHITE)
+    row.pack(fill="x", pady=(12, 0))
+    row.grid_columnconfigure(0, weight=1, uniform="db")     # Cancel = 1 part
+    row.grid_columnconfigure(1, weight=2, uniform="db")     # main action = 2 parts
+    btn(row, "Cancel", no_cmd, "#E7EEEF", INK, height=36).grid(row=0, column=0, sticky="ew", padx=(0, 6))
+    btn(row, yes_text, yes_cmd, color, WHITE, height=36).grid(row=0, column=1, sticky="ew", padx=(6, 0))
+
+
+def info_box(parent, text, mono=False):
+    lb = tk.Label(parent, text=text, justify="left", anchor="w", bg=SEAFOAM, fg=INK,
+                  font=("Consolas", 9) if mono else (F, 10), padx=12, pady=8)
+    lb.pack(fill="x", pady=(0, 8))
+    return lb
+
+
+def stat_row(parent, items):
+    """Several label/value pairs side by side in one compact box."""
+    row = tk.Frame(parent, bg=SEAFOAM)
+    row.pack(fill="x", pady=(0, 10))
+    for i, (k, v) in enumerate(items):
+        row.grid_columnconfigure(i, weight=1, uniform="st")
+        cell = tk.Frame(row, bg=SEAFOAM)
+        cell.grid(row=0, column=i, sticky="w", padx=12, pady=8)
+        tk.Label(cell, text=k, bg=SEAFOAM, fg=MUTED, font=(F, 8)).pack(anchor="w")
+        tk.Label(cell, text=v, bg=SEAFOAM, fg=INK, font=(F, 10, "bold")).pack(anchor="w")
+
+class Segmented(tk.Frame):
+    """Row of pill buttons, one selected. Use .get() like an Entry."""
+
+    def __init__(self, parent, options, value=None, bg=WHITE):
+        super().__init__(parent, bg=bg)
+        self.value, self.b = value or options[0], {}
+        for i, o in enumerate(options):
+            self.grid_columnconfigure(i, weight=1, uniform="seg")
+            b = RButton(self, o, lambda o=o: self.set(o), color="#E7EEEF", fg=INK, height=36,
+                        radius=10, font=(F, 9, "bold"), padx=6, bg=bg)
+            b.grid(row=0, column=i, sticky="ew", padx=2)
+            self.b[o] = b
+        self.set(self.value)
+
+    def set(self, v):
+        self.value = v
+        for o, b in self.b.items():
+            on = o == v
+            b.set_style(TEAL if on else "#E7EEEF", WHITE if on else INK)
+
+    def get(self):
+        return self.value
 
 class PaymentDialog(Dialog):
     def __init__(self, page, bid, default):
         super().__init__(page, "Add Payment")
         self.bid = bid
-        tk.Label(self.body, text=f"Add payment  •  {ref(bid)}", font=(F, 14, "bold"), bg=WHITE, fg=INK).pack(anchor="w", pady=(0, 10))
-        self.amt = lbl_entry(self.body, "Amount (₱)", f"{default:.2f}")
-        tk.Label(self.body, text="Method", bg=WHITE, fg=MUTED, anchor="w", font=(F, 9)).pack(fill="x")
-        self.m = ttk.Combobox(self.body, values=METHODS, state="readonly")
-        self.m.set("Cash")
-        self.m.pack(fill="x", pady=(2, 12))
-        btn(self.body, "Save payment", self.save, TEAL).pack(fill="x")
+        b = q1(BOOKING_SQL + " WHERE b.id=?", (bid,))
+        body = self.body
+        tk.Frame(body, bg=WHITE, width=400, height=1).pack()
+        dialog_header(body, "₱", "Add payment", f"{ref(bid)}  •  {b['guest']}", dy=-2)
+        stat_row(body, [("Total", money(b["total"])), ("Paid", money(b["paid"])),
+                        ("Balance", money(b["total"] - b["paid"]))])
+        self.amt = lbl_entry(body, "Amount (₱)", f"{default:.2f}")
+        tk.Label(body, text="Method", bg=WHITE, fg=MUTED, anchor="w", font=(F, 9)).pack(fill="x")
+        self.m = Segmented(body, METHODS, "Cash")
+        self.m.pack(fill="x", pady=(4, 0))
+        dialog_buttons(body, "Save payment", self.save, self.destroy)
+        self.bind("<Return>", lambda e: self.save())
 
     def save(self):
         try:
@@ -2162,48 +2498,108 @@ class PaymentDialog(Dialog):
     def ok(self):
         self.wait_window()
         return self.result
-
-
+    
 class ChargeDialog(Dialog):
     def __init__(self, page, bid):
         super().__init__(page, "Add Charge")
         self.bid = bid
         self.items = q("SELECT * FROM addons ORDER BY name")
-        tk.Label(self.body, text="Add a charge to the folio", font=(F, 14, "bold"), bg=WHITE, fg=INK).pack(anchor="w", pady=(0, 10))
-        tk.Label(self.body, text="Add-on / activity", bg=WHITE, fg=MUTED, anchor="w", font=(F, 9)).pack(fill="x")
-        self.c = ttk.Combobox(self.body, state="readonly", values=[f"{a['name']} ({money(a['price'])})" for a in self.items])
+        body = self.body
+        tk.Frame(body, bg=WHITE, width=340, height=1).pack()
+        dialog_header(body, "🧾", "Add a charge", f"{ref(bid)}  •  added to the guest folio",
+                      TINT["coral"], "#9A6B00", dy=-4)
+        tk.Label(body, text="Add-on / activity", bg=WHITE, fg=MUTED, anchor="w", font=(F, 9)).pack(fill="x")
+        self.c = ttk.Combobox(body, state="readonly",
+                              values=[f"{a['name']} ({money(a['price'])})" for a in self.items])
         self.c.current(0)
-        self.c.pack(fill="x", pady=(2, 9))
-        self.qty = lbl_entry(self.body, "Quantity", "1")
-        btn(self.body, "Add to folio", self.save, TEAL).pack(fill="x", pady=(6, 0))
+        self.c.pack(fill="x", pady=(2, 10))
+        self.c.bind("<<ComboboxSelected>>", lambda e: self.upd())
+
+        g = tk.Frame(body, bg=WHITE)
+        g.pack(fill="x")
+        g.grid_columnconfigure(1, weight=1)
+        tk.Label(g, text="Quantity", bg=WHITE, fg=MUTED, font=(F, 9)).grid(row=0, column=0, sticky="w")
+        tk.Label(g, text="Line total", bg=WHITE, fg=MUTED, font=(F, 9)).grid(row=0, column=1, sticky="w", padx=(14, 0))
+        self.qty = Stepper(g, 1, 1, 20, on_change=self.upd)
+        self.qty.grid(row=1, column=0, sticky="w", pady=(2, 0))
+        box = tk.Frame(g, bg=SEAFOAM)
+        box.grid(row=1, column=1, sticky="nsew", padx=(14, 0), pady=(2, 0))
+        self.total = tk.Label(box, bg=SEAFOAM, fg=INK, font=(F, 12, "bold"), anchor="w")
+        self.total.pack(anchor="w", padx=12, pady=(3, 0))
+        self.calc = tk.Label(box, bg=SEAFOAM, fg=MUTED, font=(F, 8), anchor="w")
+        self.calc.pack(anchor="w", padx=12, pady=(0, 3))
+
+        dialog_buttons(body, "Add to folio", self.save, self.destroy)
+        self.upd()
+        self.bind("<Return>", lambda e: self.save())
         self.wait_window()
 
-    def save(self):
-        try:
-            n = int(self.qty.get())
-            assert n > 0
-        except (ValueError, AssertionError):
-            messagebox.showwarning("Invalid", "Quantity must be a positive number.", parent=self)
-            return
+    def upd(self):
         a = self.items[self.c.current()]
-        ex("INSERT INTO booking_addons(booking_id,name,qty,price) VALUES(?,?,?,?)", (self.bid, a["name"], n, a["price"]))
-        recalc_booking(self.bid)
-        self.destroy()
+        n = int(self.qty.get())
+        self.total.config(text=money(n * a["price"]))
+        self.calc.config(text=f"{n} × {money(a['price'])}  •  before VAT")
 
+    def save(self):
+        a = self.items[self.c.current()]
+        ex("INSERT INTO booking_addons(booking_id,name,qty,price) VALUES(?,?,?,?)",
+           (self.bid, a["name"], int(self.qty.get()), a["price"]))
+        recalc_booking(self.bid)
+        self.result = True
+        self.destroy()
 
 class DatesDialog(Dialog):
     def __init__(self, page, b):
         super().__init__(page, "Change Dates")
         self.b = b
-        tk.Label(self.body, text=f"Change dates  •  {ref(b['id'])}", font=(F, 14, "bold"), bg=WHITE, fg=INK).pack(anchor="w", pady=(0, 10))
-        tk.Label(self.body, text="Check-in", bg=WHITE, fg=MUTED, font=(F, 9)).pack(anchor="w")
-        self.ci = DateEntry(self.body, b["check_in"])
-        self.ci.pack(anchor="w", pady=(2, 9))
-        tk.Label(self.body, text="Check-out (extend the stay here)", bg=WHITE, fg=MUTED, font=(F, 9)).pack(anchor="w")
-        self.co = DateEntry(self.body, b["check_out"])
-        self.co.pack(anchor="w", pady=(2, 12))
-        btn(self.body, "Save changes", self.save, TEAL).pack(fill="x")
+        body = self.body
+        tk.Frame(body, bg=WHITE, width=340, height=1).pack()
+        dialog_header(body, "📅", "Change dates",
+                      f"{ref(b['id'])}  •  Room {b['room_no']}  •  {b['guest']}", TINT["ocean"], OCEAN, dy=-4)
+
+        grid = tk.Frame(body, bg=WHITE)
+        grid.pack(fill="x")
+        grid.grid_columnconfigure((0, 2), weight=1, uniform="dt")
+        tk.Label(grid, text="Check-in", bg=WHITE, fg=MUTED, font=(F, 9)).grid(row=0, column=0, sticky="w")
+        tk.Label(grid, text="Check-out", bg=WHITE, fg=MUTED, font=(F, 9)).grid(row=0, column=2, sticky="w")
+        self.ci = DateEntry(grid, b["check_in"], on_change=self.upd)
+        self.ci.grid(row=1, column=0, sticky="ew", pady=(2, 0))
+        tk.Label(grid, text="→", bg=WHITE, fg=MUTED, font=(F, 12)).grid(row=1, column=1, padx=10, pady=(2, 0))
+        self.co = DateEntry(grid, b["check_out"], on_change=self.upd)
+        self.co.grid(row=1, column=2, sticky="ew", pady=(2, 0))
+
+        # quick extend
+        ext = tk.Frame(body, bg=WHITE)
+        ext.pack(fill="x", pady=(8, 0))
+        tk.Label(ext, text="Extend stay", bg=WHITE, fg=MUTED, font=(F, 9)).pack(side="left", padx=(0, 8))
+        for n in (1, 2, 3):
+            btn(ext, f"+{n} night" + ("s" if n > 1 else ""), lambda n=n: self.extend(n), "#E7EEEF", INK,
+                height=28, padx=10, radius=8, font=(F, 9, "bold")).pack(side="left", padx=(0, 6))
+
+        self.info = tk.Label(body, text="", anchor="w", bg=SEAFOAM, fg=INK, font=(F, 10), padx=12, pady=8)
+        self.info.pack(fill="x", pady=(10, 0))
+        dialog_buttons(body, "Save changes", self.save, self.destroy)
+        self.upd()
+        self.bind("<Return>", lambda e: self.save())
         self.wait_window()
+
+    def extend(self, n):
+        """Set check-out to the ORIGINAL check-out + n nights."""
+        self.co.set((pdate(self.b["check_out"]) + dt.timedelta(days=n)).isoformat())
+        self.upd()
+
+    def upd(self):
+        try:
+            ci, co = self.ci.date(), self.co.date()
+        except ValueError:
+            self.info.config(text="Use the format YYYY-MM-DD", fg=DANGER)
+            return
+        n = (co - ci).days
+        if n <= 0:
+            self.info.config(text="Check-out must be after check-in", fg=DANGER)
+        else:
+            p = pricing(self.b["rate"], ci, co, [], 0)
+            self.info.config(text=f"{n} night{'s' if n != 1 else ''}   •   room {money(p['room'])}", fg=INK)
 
     def save(self):
         try:
@@ -2214,13 +2610,19 @@ class DatesDialog(Dialog):
         if co <= ci:
             messagebox.showwarning("Dates", "Check-out must be after check-in.", parent=self)
             return
+        room = q1("SELECT number, status FROM rooms WHERE id=?", (self.b["room_id"],))
+        if room["status"] == "Maintenance" and (ci < pdate(self.b["check_in"]) or co > pdate(self.b["check_out"])):
+            messagebox.showwarning("Maintenance",
+                                   f"Room {room['number']} is under maintenance, so the stay can't be extended. "
+                                   "Move the guest to another room instead.", parent=self)
+            return
         if not room_free(self.b["room_id"], ci, co, exclude=self.b["id"]):
             messagebox.showerror("Unavailable", "The room is not free for those dates.", parent=self)
             return
         ex("UPDATE bookings SET check_in=?, check_out=? WHERE id=?", (ci.isoformat(), co.isoformat(), self.b["id"]))
         recalc_booking(self.b["id"])
+        self.result = True
         self.destroy()
-
 
 class MoveDialog(Dialog):
     def __init__(self, page, b):
@@ -2229,97 +2631,260 @@ class MoveDialog(Dialog):
         guests = b["adults"] + b["children"]
         self.rooms = [r for r in available_rooms(pdate(b["check_in"]), pdate(b["check_out"]), guests, exclude=b["id"])
                       if r["id"] != b["room_id"]]
-        tk.Label(self.body, text=f"Move room  •  now in Room {b['room_no']}", font=(F, 14, "bold"),
-                 bg=WHITE, fg=INK).pack(anchor="w", pady=(0, 10))
+        body = self.body
+        tk.Frame(body, bg=WHITE, width=400, height=1).pack()
+        dialog_header(body, "🛏", "Move guest",
+                      f"{ref(b['id'])}  •  now in Room {b['room_no']} ({b['room_type']})", TINT["teal"], TEAL, dy=-5)
         if not self.rooms:
-            tk.Label(self.body, text="No other rooms are free for these dates.", bg=WHITE, fg=CORAL).pack(pady=10)
-            btn(self.body, "Close", self.destroy, "#9FB4BC").pack()
+            info_box(body, "No other rooms are free for these dates and guest count.")
+            btn(body, "Close", self.destroy, "#E7EEEF", INK, height=40).pack(fill="x")
         else:
-            tk.Label(self.body, text="Move to (price is recalculated)", bg=WHITE, fg=MUTED, font=(F, 9)).pack(anchor="w")
-            self.c = ttk.Combobox(self.body, state="readonly", width=42,
+            tk.Label(body, text="Move to", bg=WHITE, fg=MUTED, font=(F, 9)).pack(anchor="w")
+            self.c = ttk.Combobox(body, state="readonly", width=42,
                                   values=[f"{r['number']} - {r['name']} ({money(r['rate'])}/night)" for r in self.rooms])
             self.c.current(0)
             self.c.pack(fill="x", pady=(2, 12))
-            btn(self.body, "Move guest", self.save, TEAL).pack(fill="x")
+            self.c.bind("<<ComboboxSelected>>", lambda e: self.upd())
+            self.note = info_box(body, "")
+            self.note.pack_configure(pady=(0, 0))
+            dialog_buttons(body, "Move guest", self.save, self.destroy)
+            self.upd()
         self.wait_window()
+
+    def upd(self):
+        r = self.rooms[self.c.current()]
+        old = self.b["rate"]
+        if r["rate"] == old:
+            self.note.config(text=f"Same rate: {money(old)}/night. Total stays the same.")
+        else:
+            word = "higher" if r["rate"] > old else "lower"
+            self.note.config(text=f"Rate changes {money(old)} → {money(r['rate'])}/night ({word}).\n"
+                                  "The reservation total is recalculated.")
 
     def save(self):
         r = self.rooms[self.c.current()]
         ex("UPDATE bookings SET room_id=?, rate=? WHERE id=?", (r["id"], r["rate"], self.b["id"]))
         recalc_booking(self.b["id"])
+        self.result = True
         self.destroy()
 
-
 class BookingDetailDialog(Dialog):
-    """Everything about one reservation in a pop-up, with the actions that make sense for its status."""
-
+    """One reservation in a pop-up. The middle part scrolls when there are many add-ons."""
+    W = 500
+    SOFT = "#E7EEEF"
+ 
     def __init__(self, app, bid):
         super().__init__(app, f"Reservation {ref(bid)}")
         self.app, self.bid = app, bid
+        self.configure(bg=BG)
+        self.body.configure(bg=BG, padx=18, pady=16)
+        self._cards = []
+ 
         b = q1(BOOKING_SQL + " WHERE b.id=?", (bid,))
-        body = self.body
+        addons = q("SELECT name,qty,price FROM booking_addons WHERE booking_id=?", (bid,))
         n = (pdate(b["check_out"]) - pdate(b["check_in"])).days
         bal = b["total"] - b["paid"]
-
-        head = tk.Frame(body, bg=WHITE)
-        head.pack(fill="x", pady=(0, 12))
-        tk.Label(head, text=ref(bid), font=(F, 16, "bold"), bg=WHITE, fg=INK).pack(side="left")
-        pill(head, b["status"], STATUS_COLORS[b["status"]], INK if b["status"] == "Reserved" else WHITE).pack(side="right")
-
-        info = tk.Frame(body, bg=WHITE)
-        info.pack(fill="x")
-        rows = [("Guest", b["guest"]), ("Phone", b["phone"] or "-"),
-                ("Room", f"{b['room_no']} • {b['room_type']}"),
-                ("Stay", f"{b['check_in']}  →  {b['check_out']}  ({n} night{'s' if n != 1 else ''})"),
-                ("Guests", f"{b['adults']} adult(s), {b['children']} child(ren)"),
-                ("Promo", b["promo"] or "-"), ("Requests", b["notes"] or "-"),
-                ("Booked by", b["staff"] or "-")]
-        for i, (k, v) in enumerate(rows):
-            tk.Label(info, text=k, bg=WHITE, fg=MUTED, font=(F, 9), anchor="w", width=10).grid(row=i, column=0, sticky="w", pady=2)
-            tk.Label(info, text=v, bg=WHITE, fg=INK, font=(F, 10), anchor="w", justify="left",
-                     wraplength=360).grid(row=i, column=1, sticky="w", pady=2)
-
-        addons = q("SELECT name,qty,price FROM booking_addons WHERE booking_id=?", (bid,))
-        lines = [f"{'Room':<24}{money(b['room_total']):>14}"]
-        for a in addons:
-            lines.append(f"{(a['name'] + ' x' + str(a['qty']))[:24]:<24}{money(a['qty'] * a['price']):>14}")
-        if b["discount"]:
-            lines.append(f"{'Discount':<24}{'-' + money(b['discount']):>14}")
-        lines += [f"{'VAT 12%':<24}{money(b['tax']):>14}", "-" * 38,
-                  f"{'TOTAL':<24}{money(b['total']):>14}", f"{'Paid':<24}{money(b['paid']):>14}",
-                  f"{'BALANCE':<24}{money(bal):>14}"]
-        tk.Label(body, text="\n".join(lines), justify="left", anchor="w", font=("Consolas", 9),
-                 bg=SEAFOAM, fg=INK, padx=12, pady=10).pack(fill="x", pady=12)
-
         st = b["status"]
-        actions = []
+        body = self.body
+        tk.Frame(body, bg=BG, width=self.W, height=1).pack()          # minimum width
+ 
+        # ---------------- header (pinned top) ----------------
+        self._head = head = tk.Frame(body, bg=BG)
+        head.pack(fill="x", pady=(0, 12))
+        left = tk.Frame(head, bg=BG)
+        left.pack(side="left")
+        tk.Label(left, text=ref(bid), font=(F, 18, "bold"), bg=BG, fg=INK).pack(anchor="w")
+        tk.Label(left, text=f"Booked {b['created'] or '-'}  •  by {b['staff'] or '-'}",
+                 font=(F, 9), bg=BG, fg=MUTED).pack(anchor="w")
+        pill(head, st, STATUS_COLORS[st], INK if st == "Reserved" else WHITE).pack(side="right")
+ 
+        # ---------------- pinned bottom (packed BEFORE the scroll area so it keeps its space) ----------------
+        self._foot = foot = tk.Frame(body, bg=BG)
+        foot.pack(side="bottom", fill="x")
+        act = self._panel(body, side="bottom", pady=(10, 10))
+        self._act_card = self._cards[-1]
+ 
+        # ---------------- scrollable middle ----------------
+        self.sf = ScrollFrame(body, bg=BG)
+        self.sf.pack(fill="both", expand=True)
+        mid = self.sf.inner
+ 
+        # ---- card 1: guest + stay ----
+        p = self._panel(mid)
+        g = tk.Frame(p, bg=WHITE)
+        g.pack(fill="x")
+        initials = "".join(w[0] for w in b["guest"].split()[:2]).upper() or "?"
+        avatar(g, initials, 44, TINT["teal"], TEAL, bg=WHITE).pack(side="left")
+        t = tk.Frame(g, bg=WHITE)
+        t.pack(side="left", padx=12)
+        tk.Label(t, text=b["guest"], font=(F, 13, "bold"), bg=WHITE, fg=INK).pack(anchor="w")
+        tk.Label(t, text=f"📞  {b['phone'] or '-'}", font=(F, 9), bg=WHITE, fg=MUTED).pack(anchor="w")
+ 
+        self._divider(p)
+ 
+        row = tk.Frame(p, bg=WHITE)
+        row.pack(fill="x")
+        row.grid_columnconfigure(0, weight=1, uniform="dt")
+        row.grid_columnconfigure(2, weight=1, uniform="dt")
+ 
+        def day(col, caption, iso, side):
+            f = tk.Frame(row, bg=WHITE)
+            f.grid(row=0, column=col, sticky=side)
+            d = pdate(iso)
+            tk.Label(f, text=caption, font=(F, 8, "bold"), bg=WHITE, fg=MUTED).pack(anchor=side)
+            tk.Label(f, text=d.strftime("%a, %d %b"), font=(F, 13, "bold"), bg=WHITE, fg=INK).pack(anchor=side)
+            tk.Label(f, text=d.strftime("%Y"), font=(F, 9), bg=WHITE, fg=MUTED).pack(anchor=side)
+ 
+        day(0, "CHECK-IN", b["check_in"], "w")
+        pill(row, f"{n} night{'s' if n != 1 else ''}", TINT["teal"], TEAL).grid(row=0, column=1, padx=14)
+        day(2, "CHECK-OUT", b["check_out"], "e")
+ 
+        self._divider(p)
+ 
+        meta = tk.Frame(p, bg=WHITE)
+        meta.pack(fill="x")
+        meta.grid_columnconfigure((0, 1), weight=1, uniform="mt")
+ 
+        def cell(r, c, icon, k, v, span=1):
+            f = tk.Frame(meta, bg=WHITE)
+            f.grid(row=r, column=c, columnspan=span, sticky="w", pady=4)
+            avatar(f, icon, 30, TINT["ocean"], INK, bg=WHITE, font=(F, 10), dy=0).pack(side="left")
+            tt = tk.Frame(f, bg=WHITE)
+            tt.pack(side="left", padx=8)
+            tk.Label(tt, text=k, font=(F, 8), bg=WHITE, fg=MUTED).pack(anchor="w")
+            tk.Label(tt, text=v, font=(F, 10, "bold"), bg=WHITE, fg=INK,
+                     wraplength=190 if span == 1 else 420, justify="left").pack(anchor="w")
+ 
+        cell(0, 0, "🛏", "Room", f"{b['room_no']} • {b['room_type']}")
+        cell(0, 1, "👥", "Guests", f"{b['adults']} adult(s), {b['children']} child(ren)")
+        cell(1, 0, "🏷", "Promo", b["promo"] or "None")
+        cell(1, 1, "₱", "Nightly rate", f"{money(b['rate'])}")
+        if b["notes"]:
+            cell(2, 0, "💬", "Requests", b["notes"], span=2)
+ 
+        # ---- card 2: billing ----
+        p = self._panel(mid)
+        tk.Label(p, text="BILLING", font=(F, 8, "bold"), bg=WHITE, fg=MUTED).pack(anchor="w", pady=(0, 6))
+        led = tk.Frame(p, bg=WHITE)
+        led.pack(fill="x")
+        led.grid_columnconfigure(0, weight=1)
+        lines = [(f"Room × {n} night{'s' if n != 1 else ''}", money(b["room_total"]), INK)]
+        for a in addons:
+            lines.append((f"{a['name']} × {a['qty']}", money(a["qty"] * a["price"]), INK))
+        if b["discount"]:
+            lines.append((f"Discount ({b['promo']})", "−" + money(b["discount"]), TEAL))
+        lines.append(("VAT 12%", money(b["tax"]), INK))
+        for i, (k, v, col) in enumerate(lines):
+            tk.Label(led, text=k, bg=WHITE, fg=MUTED, font=(F, 10), anchor="w").grid(row=i, column=0, sticky="w", pady=2)
+            tk.Label(led, text=v, bg=WHITE, fg=col, font=(F, 10), anchor="e").grid(row=i, column=1, sticky="e", pady=2)
+ 
+        self._divider(p, pad=8)
+        tot = tk.Frame(p, bg=WHITE)
+        tot.pack(fill="x")
+        tk.Label(tot, text="Total", font=(F, 12, "bold"), bg=WHITE, fg=INK).pack(side="left")
+        tk.Label(tot, text=money(b["total"]), font=(F, 14, "bold"), bg=WHITE, fg=INK).pack(side="right")
+ 
+        frac = max(0, min(1, b["paid"] / b["total"])) if b["total"] > 0 else 1
+        bar = tk.Canvas(p, height=8, bg=WHITE, highlightthickness=0, bd=0)
+        bar.pack(fill="x", pady=(12, 8))
+ 
+        def paint(_=None):
+            bar.delete("all")
+            w = bar.winfo_width()
+            if w < 10:
+                return
+            rrect(bar, 0, 0, w, 8, 4, fill=self.SOFT, outline="")
+            if frac > 0:
+                rrect(bar, 0, 0, max(8, w * frac), 8, 4, fill=TEAL, outline="")
+        bar.bind("<Configure>", paint)
+ 
+        pr = tk.Frame(p, bg=WHITE)
+        pr.pack(fill="x")
+        tk.Label(pr, text=f"Paid  {money(b['paid'])}", font=(F, 10), bg=WHITE, fg=MUTED).pack(side="left")
+        if bal > 0.009:
+            txt, fg_, bg_ = f"Balance due  {money(bal)}", DANGER, "#FCEDEA"
+        elif bal < -0.009:
+            txt, fg_, bg_ = f"Credit  {money(-bal)}", TEAL, TINT["teal"]
+        else:
+            txt, fg_, bg_ = "✔  Fully paid", TEAL, TINT["teal"]
+        tk.Label(pr, text=txt, font=(F, 10, "bold"), bg=bg_, fg=fg_, padx=12, pady=4).pack(side="right")
+ 
+        # ---- pinned: actions ----
+        primary = []
         if st == "Reserved":
-            actions += [("Check-in", "check_in", TEAL)]
+            primary.append(("Check-in", "check_in", TEAL, WHITE))
         if st == "Checked-in":
-            actions += [("Check-out", "check_out", OCEAN)]
-        if st != "Cancelled":
-            actions += [("Add payment", "pay", TEAL)]
+            primary.append(("Check-out", "check_out", TEAL, WHITE))
+        if st != "Cancelled" and bal > 0.009:
+            primary.append(("Add payment", "pay", GOLD, INK))
+        secondary = []
         if st in ("Reserved", "Checked-in"):
-            actions += [("Add charge", "charge", OCEAN), ("Change dates", "dates", "#6D9DC5"),
-                        ("Move room", "move", "#6D9DC5")]
-        actions += [("Invoice", "invoice", GOLD)]
+            secondary += [("Add charge", "charge"), ("Change dates", "dates"), ("Move room", "move")]
+        secondary.append(("Invoice", "invoice"))
+ 
+        if primary:
+            r1 = tk.Frame(act, bg=WHITE)
+            r1.pack(fill="x", pady=(0, 8))
+            for i, (text, name, col, fg) in enumerate(primary):
+                r1.grid_columnconfigure(i, weight=1, uniform="pa")
+                btn(r1, text, lambda nme=name: self.run(nme), col, fg, height=42,
+                    font=(F, 10, "bold")).grid(row=0, column=i, sticky="ew",
+                                               padx=(0 if i == 0 else 4, 4 if i < len(primary) - 1 else 0))
+        r2 = tk.Frame(act, bg=WHITE)
+        r2.pack(fill="x")
+        for i, (text, name) in enumerate(secondary):
+            r2.grid_columnconfigure(i, weight=1, uniform="se")
+            btn(r2, text, lambda nme=name: self.run(nme), self.SOFT, INK, height=34, padx=6,
+                font=(F, 9, "bold")).grid(row=0, column=i, sticky="ew",
+                                          padx=(0 if i == 0 else 3, 3 if i < len(secondary) - 1 else 0))
+ 
+        # ---- pinned: footer ----
         if st == "Reserved":
-            actions += [("Cancel booking", "cancel", DANGER)]
-        grid = tk.Frame(body, bg=WHITE)
-        grid.pack(fill="x")
-        for i, (text, name, col) in enumerate(actions):
-            grid.grid_columnconfigure(i % 3, weight=1, uniform="act")
-            btn(grid, text, lambda nme=name: self.run(nme), col, INK if col == GOLD else WHITE,
-                height=36, padx=10).grid(row=i // 3, column=i % 3, sticky="ew", padx=3, pady=3)
-        btn(body, "Close", self.destroy, "#E7EEEF", INK, height=34).pack(fill="x", pady=(10, 0))
-
+            foot.grid_columnconfigure((0, 1), weight=1, uniform="ft")
+            btn(foot, "Cancel booking", lambda: self.run("cancel"), "#FCEDEA", DANGER,
+                height=36).grid(row=0, column=0, sticky="ew", padx=(0, 6))
+            btn(foot, "Close", self.destroy, TINT["ocean"], INK,
+                height=36).grid(row=0, column=1, sticky="ew", padx=(6, 0))
+        else:
+            foot.grid_columnconfigure(0, weight=1)
+            btn(foot, "Close", self.destroy, TINT["ocean"], INK, height=36).grid(row=0, column=0, sticky="ew")
+ 
+    # ---- size the pop-up to its content, but never taller than the screen ----
+    def _show(self):
+        if not self.winfo_exists():
+            return
+        for c in self._cards:
+            c._fit()
+        self.update_idletasks()
+        content_h = self.sf.inner.winfo_reqheight()                         # full height of the scrolling part
+        other = self.body.winfo_reqheight() - self.sf.winfo_reqheight()     # header + buttons + padding
+        avail = max(220, self.winfo_screenheight() - 150 - other)           # room left (title bar + taskbar)
+        if content_h <= avail:
+            self.sf.sb.pack_forget()                                        # everything fits: no scrollbar
+        else:
+            gap = self.sf.sb.winfo_reqwidth()                               # keep pinned parts aligned with the cards
+            for w in (self._head, self._act_card, self._foot):
+                w.pack_configure(padx=(0, gap))
+        self.sf.canvas.config(height=min(content_h, avail))
+        super()._show()
+ 
+    # ---- small helpers ----
+    def _panel(self, parent, side="top", pady=(0, 10)):
+        c = Card(parent, fit=True, pad=14, radius=16)
+        c.pack(fill="x", pady=pady, side=side)
+        self._cards.append(c)
+        return c.body
+ 
+    @staticmethod
+    def _divider(parent, pad=10):
+        tk.Frame(parent, bg=BORDER, height=1).pack(fill="x", pady=pad)
+ 
     def run(self, name):
         app, bid = self.app, self.bid
         self.destroy()                                   # release the modal, then run the action
         getattr(app.pages["res"], name)(bid)
         app.refresh_current()
-
-
+        
 # ------------------------------------------------------------ calendar
 class CalendarPage(Page):
     def __init__(self, app):
@@ -2338,6 +2903,13 @@ class CalendarPage(Page):
         self.span.bind("<<ComboboxSelected>>", lambda e: self.draw())
         for name in ("Checked-out", "Checked-in", "Reserved"):
             pill(top, name, STATUS_COLORS[name], INK if name == "Reserved" else WHITE).pack(side="right", padx=3)
+        for text, col in (("Maintenance", DANGER), ("Available to book", TEAL)):
+            item = tk.Frame(top, bg=WHITE)
+            item.pack(side="right", padx=(0, 12))
+            dot = tk.Canvas(item, width=10, height=10, bg=WHITE, highlightthickness=0)
+            dot.create_oval(1, 1, 9, 9, fill=col, outline="")
+            dot.pack(side="left")
+            tk.Label(item, text=text, bg=WHITE, fg=MUTED, font=(F, 9)).pack(side="left", padx=(5, 0))
         card = Card(self, pad=8)
         card.pack(fill="both", expand=True, padx=26, pady=12)
         self.canvas = tk.Canvas(card.body, bg=WHITE, highlightthickness=0)
@@ -2410,19 +2982,30 @@ class CalendarPage(Page):
         c.create_text(12, hh - 14, text="ROOM", anchor="w", fill=MUTED, font=(F, 8, "bold"))
         for i, r in enumerate(rooms):
             y = hh + i * rh
+            maint = r["status"] != "Active"
+            if maint:
+                c.create_rectangle(0, y, W, y + rh, fill="#FCEDEA", outline="")
             c.create_line(0, y + rh, W, y + rh, fill="#EDF2F3")
             c.create_oval(12, y + rh / 2 - 4, 20, y + rh / 2 + 4, outline="",
-                          fill=TEAL if r["status"] == "Active" else DANGER)
-            c.create_text(28, y + rh / 2 - 7, text=f"Room {r['number']}", anchor="w", font=(F, 10, "bold"), fill=INK)
-            c.create_text(28, y + rh / 2 + 9, text=r["name"], anchor="w", font=(F, 8), fill=MUTED)
+                          fill=DANGER if maint else TEAL)
+            # line 1: room number (keep this one)
+            c.create_text(28, y + rh / 2 - 7, text=f"Room {r['number']}",
+                          anchor="w", font=(F, 10, "bold"), fill=INK)
+            c.create_text(28, y + rh / 2 + 9, text=r["name"],
+                          anchor="w", font=(F, 8), fill=DANGER if maint else MUTED)
         rows = q(BOOKING_SQL + " WHERE b.status!='Cancelled' AND b.check_in<? AND b.check_out>?",
                  (end.isoformat(), self.start.isoformat()))
         for b in rows:
             if b["room_id"] not in idx:
                 continue
+            ci_d = pdate(b["check_in"])
+            out_d = pdate(b["actual_out"]) if b["actual_out"] else pdate(b["check_out"])
+            out_d = max(out_d, ci_d + dt.timedelta(days=1))      # a bar is at least one night wide
+            if out_d <= self.start:
+                continue
             y = hh + idx[b["room_id"]] * rh
-            x1 = lw + ((pdate(b["check_in"]) - self.start).days + 0.5) * cw
-            x2 = lw + ((pdate(b["check_out"]) - self.start).days + 0.5) * cw
+            x1 = lw + ((ci_d - self.start).days + 0.5) * cw
+            x2 = lw + ((out_d - self.start).days + 0.5) * cw
             x1, x2 = max(x1, lw), min(x2, lw + days * cw)
             tag = f"b{b['id']}"
             rrect(c, x1 + 1, y + 6, x2 - 1, y + rh - 6, 9, fill=STATUS_COLORS[b["status"]], outline="", tags=(tag,))
@@ -2438,29 +3021,50 @@ class CalendarPage(Page):
 
 
 # ------------------------------------------------------------ guests
-class GuestDialog(Dialog):
+class GuestDialog(FormDialog):
     def __init__(self, page, g=None):
-        super().__init__(page, "Edit Guest" if g else "Add Guest")
+        super().__init__(page, "Edit Guest" if g else "Add Guest", "👤",
+                         "Edit guest" if g else "Add a guest",
+                         g["name"] if g else "Create a guest profile for future stays")
         self.page, self.g = page, g
-        b = self.body
-        tk.Label(b, text="Edit guest" if g else "Add a guest", font=(F, 14, "bold"), bg=WHITE, fg=INK).pack(anchor="w", pady=(0, 10))
-        self.name = lbl_entry(b, "Full name *", g["name"] if g else "")
-        self.phone = lbl_entry(b, "Phone *", g["phone"] if g else "")
-        self.email = lbl_entry(b, "Email", g["email"] if g else "")
-        self.addr = lbl_entry(b, "Address", g["address"] if g else "")
-        self.idn = lbl_entry(b, "ID number", g["id_no"] if g else "")
-        self.notes = lbl_entry(b, "Notes / preferences", g["notes"] if g else "")
-        self.vip = tk.IntVar(value=g["vip"] if g else 0)
-        ttk.Checkbutton(b, text="★ VIP guest", variable=self.vip, style="W.TCheckbutton").pack(anchor="w")
-        btn(b, "Save", self.save, TEAL).pack(fill="x", pady=(12, 0))
-
+ 
+        p = self.panel("Contact")
+        grid = form_grid(p)
+        self.name = grid_entry(grid, 0, 0, "Full name *", g["name"] if g else "", span=2)
+        self.phone = grid_entry(grid, 1, 0, "Phone *", g["phone"] if g else "")
+        self.email = grid_entry(grid, 1, 1, "Email", g["email"] if g else "")
+        self.addr = grid_entry(grid, 2, 0, "Address", g["address"] if g else "", span=2)
+ 
+        p = self.panel("Profile")
+        grid = form_grid(p)
+        self.idn = grid_entry(grid, 0, 0, "ID number", g["id_no"] if g else "")
+        cell = grid_cell(grid, 0, 1, "VIP status")
+        self.vip = Segmented(cell, ["Regular", "★ VIP"], "★ VIP" if (g and g["vip"]) else "Regular")
+        self.vip.pack(fill="x")
+        self.notes = grid_entry(grid, 1, 0, "Notes / preferences", g["notes"] if g else "", span=2)
+ 
+        self.footer("Save guest", self.save)
+        self.finish()
+ 
     def save(self):
         n, p = self.name.get().strip(), self.phone.get().strip()
         if not n or not p:
             messagebox.showwarning("Required", "Name and phone are required.", parent=self)
             return
+ 
+        sql, args = "SELECT name FROM guests WHERE phone=?", [p]
+        if self.g:                          # when editing, ignore the guest's own record
+            sql += " AND id!=?"
+            args.append(self.g["id"])
+        dup = q1(sql, args)
+        if dup:
+            messagebox.showwarning(
+                "Duplicate phone",
+                f"{dup['name']} already uses this phone number.\n"
+                "Search for that guest instead of adding a new one.", parent=self)
+            return
         v = (n, p, self.email.get().strip(), self.addr.get().strip(), self.idn.get().strip(),
-             self.notes.get().strip(), self.vip.get())
+             self.notes.get().strip(), 1 if self.vip.get() == "★ VIP" else 0)
         if self.g:
             ex("UPDATE guests SET name=?,phone=?,email=?,address=?,id_no=?,notes=?,vip=? WHERE id=?", v + (self.g["id"],))
         else:
@@ -2468,7 +3072,6 @@ class GuestDialog(Dialog):
                v + (today().isoformat(),))
         self.destroy()
         self.page.refresh()
-
 
 class GuestsPage(Page):
     def __init__(self, app):
@@ -2551,7 +3154,7 @@ class GuestsPage(Page):
         if q1("SELECT 1 FROM bookings WHERE guest_id=?", (g["id"],)):
             messagebox.showwarning("In use", "This guest has bookings and cannot be deleted.")
             return
-        if confirm(self, "Delete guest?", f"Delete {g['name']}? This action cannot be undone."):
+        if confirm_delete(self, "guest", f"Delete {g['name']}? This action cannot be undone."):
             ex("DELETE FROM guests WHERE id=?", (g["id"],))
             self.refresh()
 
@@ -2607,37 +3210,55 @@ class HousekeepingPage(Page):
         r = self.rid()
         if r:
             cur = q1("SELECT status FROM rooms WHERE id=?", (r,))["status"]
+            if cur != "Maintenance" and not can_set_maintenance(self, r):
+                return
             ex("UPDATE rooms SET status=? WHERE id=?", ("Active" if cur == "Maintenance" else "Maintenance", r))
             self.refresh()
 
 
 # ------------------------------------------------------------ promo codes (admin)
-class PromoDialog(Dialog):
+class PromoDialog(FormDialog):
     def __init__(self, page, p=None):
-        super().__init__(page, "Edit promo code" if p else "New promo code")
-        self.page, self.p = page, p
-        b = self.body
         used = promo_used(p["code"]) if p else 0
-        tk.Label(b, text="Edit promo code" if p else "Create a promo code", font=(F, 14, "bold"),
-                 bg=WHITE, fg=INK).pack(anchor="w", pady=(0, 10))
-        self.code = lbl_entry(b, "Code (letters & numbers, e.g. SUMMER25)", p["code"] if p else "")
+        super().__init__(page, "Edit promo code" if p else "New promo code", "🏷",
+                         "Edit promo code" if p else "Create a promo code",
+                         (f"Used on {used} reservation{'s' if used != 1 else ''}" if p
+                          else "A discount guests can apply when booking"),
+                         tint=TINT["coral"], fg="#9A6B00")
+        self.page, self.p = page, p
+ 
+        card = self.panel("Code & discount")
+        g = form_grid(card)
+        self.code = grid_entry(g, 0, 0, "Code", p["code"] if p else "")
         if used:
             self.code.config(state="disabled")
-        self.pct = lbl_entry(b, "Discount (%)", f"{p['percent']:g}" if p else "10")
-        tk.Label(b, text="Expiry date", bg=WHITE, fg=MUTED, font=(F, 9)).pack(anchor="w")
-        exp = tk.Frame(b, bg=WHITE)
-        exp.pack(fill="x", pady=(2, 9))
+            hint(self.code.master, "Locked: already used on reservations")
+        else:
+            hint(self.code.master, "Letters and numbers, e.g. SUMMER25")
+        self.pct = grid_entry(g, 0, 1, "Discount (%)", f"{p['percent']:g}" if p else "10")
+ 
+        cell = grid_cell(g, 1, 0, "Expiry date", span=2)
+        row = tk.Frame(cell, bg=WHITE)
+        row.pack(fill="x")
         self.noexp = tk.IntVar(value=0 if (p and p["expires"]) else 1)
-        self.exp = DateEntry(exp, p["expires"] if (p and p["expires"]) else (today() + dt.timedelta(days=30)).isoformat())
+        self.exp = DateEntry(row, p["expires"] if (p and p["expires"]) else (today() + dt.timedelta(days=30)).isoformat())
         self.exp.pack(side="left")
-        ttk.Checkbutton(exp, text="No expiry", variable=self.noexp, style="W.TCheckbutton").pack(side="left", padx=14)
-        self.maxu = lbl_entry(b, "Usage limit (0 = unlimited)", (p["max_uses"] or 0) if p else 0)
-        self.minn = lbl_entry(b, "Minimum nights (0 = none)", (p["min_nights"] or 0) if p else 0)
-        self.note = lbl_entry(b, "Note (only staff see this)", (p["note"] or "") if p else "", width=44)
-        self.active = tk.IntVar(value=p["active"] if p else 1)
-        ttk.Checkbutton(b, text="Active (guests can use it)", variable=self.active, style="W.TCheckbutton").pack(anchor="w")
-        btn(b, "Save promo code", self.save, TEAL, height=42).pack(fill="x", pady=(14, 0))
-
+        ttk.Checkbutton(row, text="No expiry", variable=self.noexp, style="W.TCheckbutton").pack(side="left", padx=14)
+ 
+        card = self.panel("Rules")
+        g = form_grid(card)
+        self.maxu = grid_entry(g, 0, 0, "Usage limit", (p["max_uses"] or 0) if p else 0)
+        hint(self.maxu.master, "0 = unlimited")
+        self.minn = grid_entry(g, 0, 1, "Minimum nights", (p["min_nights"] or 0) if p else 0)
+        hint(self.minn.master, "0 = no minimum")
+        self.note = grid_entry(g, 1, 0, "Note (only staff see this)", (p["note"] or "") if p else "", span=2)
+        cell = grid_cell(g, 2, 0, "Status", span=2)
+        self.active = Segmented(cell, ["Active", "Disabled"], "Active" if (not p or p["active"]) else "Disabled")
+        self.active.pack(fill="x")
+ 
+        self.footer("Save promo code", self.save)
+        self.finish()
+ 
     def save(self):
         code = self.code.get().strip().upper()
         if not code or not code.isalnum() or len(code) > 20:
@@ -2658,7 +3279,8 @@ class PromoDialog(Dialog):
             except ValueError:
                 messagebox.showwarning("Date", "Use the expiry date format YYYY-MM-DD.", parent=self)
                 return
-        vals = (code, pct, self.active.get(), expires, maxu, minn, self.note.get().strip())
+        active = 1 if self.active.get() == "Active" else 0
+        vals = (code, pct, active, expires, maxu, minn, self.note.get().strip())
         try:
             if self.p:
                 ex("UPDATE promos SET code=?,percent=?,active=?,expires=?,max_uses=?,min_nights=?,note=? WHERE id=?",
@@ -2671,7 +3293,6 @@ class PromoDialog(Dialog):
             return
         self.destroy()
         self.page.refresh()
-
 
 class PromoPage(Page):
     def __init__(self, app):
@@ -2749,7 +3370,8 @@ class PromoPage(Page):
         if promo_used(p["code"]):
             messagebox.showwarning("In use", "This code was used on reservations. Disable it instead of deleting it.")
             return
-        if messagebox.askyesno("Delete", f"Delete promo code {p['code']}?"):
+        if confirm_delete(self, "promo code", f"Delete promo code {p['code']}? "
+                                        "This action cannot be undone."):
             ex("DELETE FROM promos WHERE id=?", (p["id"],))
             self.refresh()
 
@@ -2878,29 +3500,38 @@ class ReportsPage(Page):
 
 
 # ------------------------------------------------------------ staff (admin)
-class StaffDialog(Dialog):
+class StaffDialog(FormDialog):
     def __init__(self, page, u=None):
-        super().__init__(page, "Edit staff" if u else "Add staff")
+        super().__init__(page, "Edit staff" if u else "Add staff", "🔑",
+                         "Edit staff account" if u else "New staff account",
+                         f"@{u['username']}" if u else "Create a sign-in for a team member",
+                         tint=TINT["ocean"], fg=OCEAN)
         self.page, self.u = page, u
-        b = self.body
-        tk.Label(b, text="Edit staff account" if u else "Create a staff account", font=(F, 14, "bold"),
-                 bg=WHITE, fg=INK).pack(anchor="w", pady=(0, 10))
-        self.user = lbl_entry(b, "Username *", u["username"] if u else "")
+ 
+        card = self.panel("Account")
+        g = form_grid(card)
+        self.user = grid_entry(g, 0, 0, "Username *", u["username"] if u else "")
         if u:
             self.user.config(state="disabled")      # bookings/payments reference the username
-        self.full = lbl_entry(b, "Full name *", u["fullname"] if u else "")
-        tk.Label(b, text="Role", bg=WHITE, fg=MUTED, anchor="w", font=(F, 9)).pack(fill="x")
-        self.role = ttk.Combobox(b, values=["staff", "admin"], state="readonly")
-        self.role.set(u["role"] if u else "staff")
-        self.role.pack(fill="x", pady=(2, 9))
-        self.pw = lbl_entry(b, "New password (leave blank to keep current)" if u else "Password * (min 6 characters)")
-        self.pw.config(show="•")
-        self.pw2 = lbl_entry(b, "Confirm password")
-        self.pw2.config(show="•")
-        btn(b, "Save", self.save, TEAL, height=42).pack(fill="x", pady=(10, 0))
-
+        else:
+            hint(self.user.master, "3-20 letters, numbers or _")
+        self.full = grid_entry(g, 0, 1, "Full name *", u["fullname"] if u else "")
+        cell = grid_cell(g, 1, 0, "Role", span=2)
+        self.role = Segmented(cell, ["Front desk", "Admin"], "Admin" if (u and u["role"] == "admin") else "Front desk")
+        self.role.pack(fill="x")
+ 
+        card = self.panel("Password")
+        g = form_grid(card)
+        self.pw = grid_entry(g, 0, 0, "New password" if u else "Password *", show="•")
+        self.pw2 = grid_entry(g, 0, 1, "Confirm password", show="•")
+        hint(card, "Leave both blank to keep the current password" if u else "At least 6 characters")
+ 
+        self.footer("Save account", self.save)
+        self.finish()
+ 
     def save(self):
-        full, role = self.full.get().strip(), self.role.get()
+        full = self.full.get().strip()
+        role = "admin" if self.role.get() == "Admin" else "staff"
         pw, pw2 = self.pw.get(), self.pw2.get()
         if not full:
             messagebox.showwarning("Required", "Full name is required.", parent=self)
@@ -2938,7 +3569,6 @@ class StaffDialog(Dialog):
                 return
         self.destroy()
         self.page.refresh()
-
 
 class StaffPage(Page):
     def __init__(self, app):
@@ -3001,8 +3631,8 @@ class StaffPage(Page):
         if u["role"] == "admin" and self.admin_count() <= 1:
             messagebox.showwarning("Not allowed", "There must be at least one admin.")
             return
-        if messagebox.askyesno("Delete", f"Delete the account '{u['username']}'?\n\n"
-                                         "Their past bookings and payments are kept."):
+        if confirm_delete(self, "account", f"Delete the account '{u['username']}'? "
+                                   "Their past bookings and payments are kept."):
             ex("DELETE FROM users WHERE id=?", (u["id"],))
             self.refresh()
 
