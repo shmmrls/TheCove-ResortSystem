@@ -19,6 +19,7 @@ import random
 import calendar as pycal
 import datetime as dt
 import uuid
+import time
 import tkinter as tk
 import tkinter.font as tkfont
 import backup_tools as backups
@@ -39,12 +40,14 @@ IMG_DIR = os.path.join(BASE, "resort_images")
 ASSETS_DIR = os.path.join(BASE, "assets") 
 DB_PATH = os.path.join(BASE, "resort.db")
 BACKUP_DIR = os.path.join(BASE, "backups")
+EXPORT_DIR = os.path.join(BASE, "exports")
 LOG_PATH = os.path.join(BASE, "activity.log")
 os.makedirs(IMG_DIR, exist_ok=True)
 
 RESORT = "The Cove RESORT"
 LOGO_PATH = os.path.join(ASSETS_DIR, "logo.png")  
 LOGO_WELCOME_PATH = os.path.join(ASSETS_DIR, "logo_welcome.png")  
+LOGO_ABOUT_PATH = os.path.join(ASSETS_DIR, "logo_about.png")
 VAT = 0.12
 SENIOR_PWD_PCT = 20          # Senior citizen / PWD discount (%), VAT-exempt
 WEEKEND_MULT = 1.15          # Fri & Sat nights cost 15% more
@@ -100,6 +103,10 @@ def ex(sql, args=()):
 
 def money(x):
     return f"₱{float(x):,.2f}"
+
+def dot(*parts):
+    """Join any number of pieces with a bullet, skipping empty ones."""
+    return "  •  ".join(str(p) for p in parts if p not in (None, ""))
 
 def vat_label():
     """Text for the VAT line on invoices and summaries, e.g. 'VAT 12%'."""
@@ -1388,6 +1395,9 @@ class Login(tk.Tk):
 
         btn(form, "Sign in", self.go, TEAL, WHITE, height=52, radius=26,
             font=(F, 12, "bold")).pack(fill="x")
+        about = tk.Label(form, text="About this system", font=(F, 9, "underline"), bg=WHITE, fg=TEAL, cursor="hand2")
+        about.pack(pady=(14, 0))
+        about.bind("<Button-1>", lambda e: AboutDialog(self))
         if os.environ.get("DEV_LOGIN_HINT"):
             tk.Label(form, text="admin / admin123   •   staff / staff123", font=(F, 9),
                      bg=WHITE, fg=TEAL).pack(pady=(22, 0))
@@ -1461,8 +1471,9 @@ class DashboardPage(Page):
         btn(self.head, "＋  New reservation", lambda: app.new_booking(), CORAL).pack(side="right")
         if app.role == "admin":
             btn(self.head, "Load demo data", self.demo, CREAM, INK).pack(side="right", padx=(0, 8))
-        tk.Label(self.head, text=today().strftime("%A, %d %B %Y"), bg=CREAM, fg=INK,
-                 font=(F, 9, "bold"), padx=14, pady=8).pack(side="right", padx=(0, 12))
+        self.clock = tk.Label(self.head, text="", bg=CREAM, fg=INK, font=(F, 9, "bold"), padx=14, pady=8)
+        self.clock.pack(side="right", padx=(0, 12))
+        self.tick()
         row = tk.Frame(self, bg=BG)
         row.pack(fill="x", padx=20)
         self.kpi = {}
@@ -1499,6 +1510,12 @@ class DashboardPage(Page):
         row = tree.identify_row(e.y)
         if row:
             BookingDetailDialog(self.app, int(row))
+
+    def tick(self):
+        if not self.winfo_exists():
+            return
+        self.clock.config(text=time.strftime("%A, %d %B %Y   %I:%M:%S %p"))
+        self.after(1000, self.tick)
 
     def demo(self):
         if messagebox.askyesno("Demo data", "Add sample guests and bookings for testing?"):
@@ -1669,13 +1686,14 @@ class BookingPage(Page):
         btn(pr, "Apply", self.apply_promo, TEAL, height=34).pack(side="left", padx=(8, 0))
         self.promo_msg = tk.Label(p, text="", bg=WHITE, font=(F, 9), anchor="w")
         self.promo_msg.pack(fill="x", pady=(0, 6))
-        self.promo.bind("<KeyRelease>", self.promo_edited)\
+        self.promo.bind("<KeyRelease>", self.promo_edited)
     
         tk.Label(p, text=f"Senior / PWD discount ({SENIOR_PWD_PCT:g}%)", bg=WHITE, fg=MUTED,
                  font=(F, 9)).pack(anchor="w", pady=(4, 0))
         self.special = Segmented(p, ["None", "Senior", "PWD"], "None", on_change=self.special_changed)
         self.special.pack(fill="x", pady=(2, 6))
-        self.sp_id = lbl_entry(p, "Senior / PWD ID number (required if selected)")
+        self.sp_box = tk.Frame(p, bg=WHITE)            # stays hidden until Senior or PWD is picked
+        self.sp_id = lbl_entry(self.sp_box, "Senior / PWD ID number *")
 
         tk.Label(p, text="Deposit now (₱)", bg=WHITE, fg=MUTED, font=(F, 9)).pack(anchor="w")
         self.dep = ttk.Entry(p)
@@ -1855,14 +1873,19 @@ class BookingPage(Page):
         return out
 
     def special_changed(self):
-        """Senior/PWD replaces any promo code (the two can't be combined)."""
+        """Senior/PWD replaces any promo code, and only then is the ID field shown."""
         if self.special.get() != "None":
             self.promo.delete(0, "end")
             self.promo_pct, self.promo_code = 0, ""
             self.set_promo_msg("Senior / PWD discount replaces promo codes.", True)
+            self.sp_box.pack(fill="x", after=self.special)      # show it right under the buttons
+            self.sp_id.focus_set()
         else:
             self.promo_msg.config(text="")
+            self.sp_id.delete(0, "end")                         # don't keep a stale ID
+            self.sp_box.pack_forget()
         self.summary()
+
 
     def current_pricing(self):
         if self.special.get() != "None":
@@ -2315,6 +2338,14 @@ class BookingsPage(Page):
         self.st.set("All")
         self.st.pack(side="left", padx=8)
         self.st.bind("<<ComboboxSelected>>", lambda e: self.load())
+        self.quick = tk.StringVar(value="All dates")
+        self.mb = tk.Menubutton(top, text="All dates ▾", relief="flat", bg=TINT["ocean"], fg=INK,
+                                font=(F, 9, "bold"), padx=12, pady=5, cursor="hand2", activebackground=AQUA)
+        menu = tk.Menu(self.mb, tearoff=0)
+        self.mb["menu"] = menu
+        for label in ("All dates", "Arriving today", "In-house now", "Unpaid balance", "This month"):
+            menu.add_radiobutton(label=label, variable=self.quick, value=label, command=self.load)
+        self.mb.pack(side="left", padx=(14, 0))
         cols = ("ref", "guest", "room", "ci", "co", "n", "total", "paid", "bal", "status")
         f, self.tree = make_tree(self, cols, ("Ref", "Guest", "Room", "Check-in", "Check-out", "Nights",
                                               "Total", "Paid", "Balance", "Status"),
@@ -2341,6 +2372,19 @@ class BookingsPage(Page):
         if self.st.get() != "All":
             sql += " AND b.status=?"
             args.append(self.st.get())
+        qv, t = self.quick.get(), today().isoformat()
+        self.mb.config(text=qv + " ▾")
+        if qv == "Arriving today":
+            sql += " AND b.status='Reserved' AND b.check_in=?"
+            args.append(t)
+        elif qv == "In-house now":
+            sql += " AND b.status='Checked-in'"
+        elif qv == "Unpaid balance":
+            sql += (" AND b.status IN ('Reserved','Checked-in') AND b.total - "
+                    "(SELECT COALESCE(SUM(amount),0) FROM payments p WHERE p.booking_id=b.id) > 0.009")
+        elif qv == "This month":
+            sql += " AND substr(b.check_in,1,7)=?"
+            args.append(t[:7])
         for b in q(sql + " ORDER BY b.check_in DESC, b.id DESC", args):
             n = (pdate(b["check_out"]) - pdate(b["check_in"])).days
             self.tree.insert("", "end", iid=str(b["id"]), tags=(b["status"],),
@@ -2609,7 +2653,7 @@ class PaymentDialog(Dialog):
         b = q1(BOOKING_SQL + " WHERE b.id=?", (bid,))
         body = self.body
         tk.Frame(body, bg=WHITE, width=400, height=1).pack()
-        dialog_header(body, "₱", "Add payment", f"{ref(bid)}  •  {b['guest']}", dy=-2)
+        dialog_header(body, "₱", "Add payment", dot(ref(bid), b["guest"]), dy=-2)
         stat_row(body, [("Total", money(b["total"])), ("Paid", money(b["paid"])),
                         ("Balance", money(b["total"] - b["paid"]))])
         self.amt = lbl_entry(body, "Amount (₱)", f"{default:.2f}")
@@ -3031,7 +3075,56 @@ class BookingDetailDialog(Dialog):
         self.destroy()                                   # release the modal, then run the action
         getattr(app.pages["res"], name)(bid)
         app.refresh_current()
-        
+
+class AboutDialog(Dialog):
+    def __init__(self, parent):
+        super().__init__(parent, "About")
+        self.configure(bg=BG)
+        b = self.body
+        b.configure(bg=BG, padx=22, pady=18)
+        tk.Frame(b, bg=BG, width=400, height=1).pack()          # minimum width
+
+        # ---- header
+        self.logo = logo_photo(LOGO_ABOUT_PATH, 64)           # keep a reference on self!
+        tk.Label(b, image=self.logo, bg=BG, bd=0).pack(pady=(0, 8))
+        tk.Label(b, text=RESORT, font=(F, 18, "bold"), bg=BG, fg=INK).pack()
+        tk.Frame(b, bg=GOLD, width=48, height=4).pack(pady=(6, 6))
+        tk.Label(b, text="Reservation & Management System", font=(F, 10), bg=BG, fg=TEAL).pack()
+        tk.Message(b, text="Book rooms, track guests and payments, and keep the resort "
+                           "running smoothly, all in one place.",
+                   width=360, justify="center", bg=BG, fg=MUTED, font=(F, 9)).pack(pady=(10, 14))
+
+        # ---- house rules card
+        card = Card(b, fit=True, pad=14, radius=16)
+        card.pack(fill="x")
+        c = card.body
+        tk.Label(c, text="HOUSE RULES", font=(F, 8, "bold"), bg=WHITE, fg=MUTED).pack(anchor="w", pady=(0, 8))
+        rules = [
+            ("📅", "ocean", "Cancellation",
+             "Free up to 3 days before arrival. After that, the first night is kept."),
+            ("🌙", "gold", "Weekend rate",
+             f"Fri & Sat nights cost {(WEEKEND_MULT - 1) * 100:g}% more."),
+            ("🧾", "coral", "Tax", f"{vat_label()} on room and add-ons."),
+            ("🏷", "teal", "Senior / PWD",
+             f"{SENIOR_PWD_PCT:g}% off and VAT-exempt (ID required)."),
+        ]
+        for i, (icon, tint, head, text) in enumerate(rules):
+            if i:
+                tk.Frame(c, bg=BORDER, height=1).pack(fill="x", pady=8)
+            row = tk.Frame(c, bg=WHITE)
+            row.pack(fill="x")
+            avatar(row, icon, 34, TINT[tint], INK, bg=WHITE, font=(F, 12), dy=0).pack(side="left", anchor="n")
+            col = tk.Frame(row, bg=WHITE)
+            col.pack(side="left", padx=12, fill="x", expand=True)
+            tk.Label(col, text=head, font=(F, 10, "bold"), bg=WHITE, fg=INK).pack(anchor="w")
+            tk.Label(col, text=text, font=(F, 9), bg=WHITE, fg=MUTED, wraplength=290,
+                     justify="left").pack(anchor="w")
+        card._fit()                                             # measure before the window is shown
+
+        tk.Label(b, text="Version 3   •   Python · Tkinter · SQLite", font=(F, 8),
+                 bg=BG, fg=MUTED).pack(pady=(12, 0))
+        btn(b, "Close", self.destroy, TEAL, WHITE, height=40).pack(fill="x", pady=(10, 0))
+
 # ------------------------------------------------------------ calendar
 class CalendarPage(Page):
     def __init__(self, app):
@@ -3705,7 +3798,9 @@ class ReportsPage(Page):
         self.canvas.draw()
 
     def export(self):
-        f = filedialog.asksaveasfilename(defaultextension=".csv", initialfile="bookings_report.csv")
+        f = filedialog.asksaveasfilename(
+            defaultextension=".csv", initialfile="bookings_report.csv",
+            initialdir=EXPORT_DIR if os.path.isdir(EXPORT_DIR) else BASE)
         if not f:
             return
         with open(f, "w", newline="", encoding="utf-8") as fh:
@@ -3716,7 +3811,6 @@ class ReportsPage(Page):
                             b["check_out"], b["status"], b["promo"] or "", f"{b['total']:.2f}", f"{b['paid']:.2f}",
                             f"{b['total'] - b['paid']:.2f}"])
         messagebox.showinfo("Saved", "Report exported.")
-
     def backup(self):
         try:
             path = backups.make_backup(conn, BACKUP_DIR, keep=BACKUP_KEEP)
@@ -3730,18 +3824,41 @@ class ReportsPage(Page):
     def show_log(self):
         d = Dialog(self, "Activity log")
         tk.Label(d.body, text="Activity log", font=(F, 14, "bold"), bg=WHITE, fg=INK).pack(anchor="w", pady=(0, 10))
-        box = tk.Frame(d.body, bg=WHITE)
-        box.pack(fill="both", expand=True)
-        t = tk.Text(box, font=("Consolas", 9), bd=0, bg=WHITE, fg=INK, width=80, height=22,
+        lines = backups.tail_log(LOG_PATH, 500)
+        users = sorted({ln.split(" | ")[1] for ln in lines if ln.count(" | ") >= 2})
+
+        pw = tk.PanedWindow(d.body, orient="horizontal", sashwidth=6, bg=BORDER, bd=0)
+        pw.pack(fill="both", expand=True)
+        left = tk.Frame(pw, bg=WHITE)
+        lb = tk.Listbox(left, font=(F, 10), bd=0, width=14, height=22, exportselection=False,
+                        selectbackground=TEAL, selectforeground=WHITE, activestyle="none")
+        lb.pack(fill="both", expand=True)
+        for name in ["Everyone"] + users:
+            lb.insert("end", name)
+        lb.selection_set(0)
+
+        right = tk.Frame(pw, bg=WHITE)
+        t = tk.Text(right, font=("Consolas", 9), bd=0, bg=WHITE, fg=INK, width=70, height=22,
                     padx=10, pady=10, wrap="none")
-        sb = ttk.Scrollbar(box, orient="vertical", command=t.yview)
+        sb = ttk.Scrollbar(right, orient="vertical", command=t.yview)
         t.configure(yscrollcommand=sb.set)
         t.pack(side="left", fill="both", expand=True)
         sb.pack(side="right", fill="y")
-        t.insert("1.0", "\n".join(backups.read_log(LOG_PATH)) or "No activity recorded yet.")
-        t.config(state="disabled")
-        btn(d.body, "Close", d.destroy, TINT["ocean"], INK, height=36).pack(fill="x", pady=(12, 0))
+        pw.add(left, minsize=110)
+        pw.add(right, minsize=300)
 
+        def show(_=None):
+            sel = lb.curselection()
+            who = lb.get(sel[0]) if sel else "Everyone"
+            rows = [ln for ln in lines if who == "Everyone" or ln.split(" | ")[1:2] == [who]]
+            t.config(state="normal")
+            t.delete("1.0", "end")
+            t.insert("1.0", "\n".join(rows) or "No activity recorded yet.")
+            t.config(state="disabled")
+
+        lb.bind("<<ListboxSelect>>", show)
+        show()
+        btn(d.body, "Close", d.destroy, TINT["ocean"], INK, height=36).pack(fill="x", pady=(12, 0))
 # ------------------------------------------------------------ staff (admin)
 class ChangePasswordDialog(FormDialog):
     def __init__(self, app):
@@ -3945,8 +4062,14 @@ class SettingsPage(Page):
         # ---- left: pricing / backups / default payment method (LabelFrames)
         g = group(left.body, "Pricing")
         self.vat = lbl_entry(g, "VAT (%)")
-        self.weekend = lbl_entry(g, "Weekend surcharge for Fri & Sat nights (%)")
- 
+
+        tk.Label(g, text="Weekend surcharge for Fri & Sat nights (%)", bg=WHITE, fg=MUTED,
+                anchor="w", font=(F, 9)).pack(fill="x")
+        self.weekend = tk.Scale(g, from_=0, to=100, orient="horizontal", bg=WHITE, fg=INK,
+                                troughcolor=BG, highlightthickness=0, bd=0, activebackground=TEAL,
+                                font=(F, 9), cursor="hand2")
+        
+        self.weekend.pack(fill="x", pady=(2, 9))
         g = group(left.body, "Backups")
         self.keep = lbl_entry(g, "Number of backups to keep")
  
@@ -3981,14 +4104,28 @@ class SettingsPage(Page):
         self.a_price.grid(row=1, column=1, padx=(8, 0))
         btn(row, "Add", self.add_addon, TEAL, height=34).grid(row=1, column=2, padx=(8, 0))
         btn(g, "Remove selected", self.remove_addon, "#FCEDEA", DANGER, height=34).pack(fill="x", pady=(8, 0))
+        g = group(right.body, "Storage")
+        tk.Label(g, text="Working folder (os.getcwd)", bg=WHITE, fg=MUTED, font=(F, 9), anchor="w").pack(fill="x")
+        self.cwd_lbl = tk.Label(g, text="", bg=SEAFOAM, fg=INK, font=("Consolas", 8), anchor="w",
+                                justify="left", wraplength=380, padx=8, pady=6)
+        self.cwd_lbl.pack(fill="x", pady=(2, 6))
+        tk.Label(g, text=r"CSV exports go to  ...\wip\exports", bg=WHITE, fg=MUTED,
+                font=(F, 8), anchor="w").pack(fill="x")            # raw string: backslashes stay as typed
+        self.mod_lbl = tk.Label(g, text="", bg=WHITE, fg=MUTED, font=(F, 8), anchor="w",
+                                justify="left", wraplength=380)
+        self.mod_lbl.pack(fill="x", pady=(4, 6))
+        row2 = tk.Frame(g, bg=WHITE)
+        row2.pack(fill="x")
+        row2.grid_columnconfigure((0, 1), weight=1, uniform="sto")
+        btn(row2, "Create exports folder", self.make_exports, TEAL, height=34).grid(row=0, column=0, sticky="ew", padx=(0, 4))
+        btn(row2, "Remove if empty", self.remove_exports, "#FCEDEA", DANGER, height=34).grid(row=0, column=1, sticky="ew", padx=(4, 0))
         self.items = []
  
     def refresh(self):
-        for entry, val in ((self.vat, f"{VAT * 100:g}"),
-                           (self.weekend, f"{(WEEKEND_MULT - 1) * 100:g}"),
-                           (self.keep, str(BACKUP_KEEP))):
+        for entry, val in ((self.vat, f"{VAT * 100:g}"), (self.keep, str(BACKUP_KEEP))):
             entry.delete(0, "end")
             entry.insert(0, val)
+        self.weekend.set(round((WEEKEND_MULT - 1) * 100))
         self.method_var.set(DEFAULT_METHOD)
         self.load_addons()
  
@@ -3997,7 +4134,7 @@ class SettingsPage(Page):
         self.lb.delete(0, "end")
         for a in self.items:
             self.lb.insert("end", f"{a['name']}   -   {money(a['price'])}")
- 
+    
     def add_addon(self):
         name = self.a_name.get().strip()
         try:
@@ -4033,7 +4170,33 @@ class SettingsPage(Page):
         backups.log_action(LOG_PATH, self.app.username, f"Removed add-on '{a['name']}'")
         self.lb.delete(i)
         del self.items[i]                       # keep the list in step with the Listbox
- 
+
+    def refresh_storage(self):
+        self.cwd_lbl.config(text=os.getcwd())
+        names = [n for n in dir(backups) if not n.startswith("_") and callable(getattr(backups, n))]
+        self.mod_lbl.config(text="backup_tools has: " + ", ".join(names))     # dir() lists a module's names
+        self.refresh_storage()
+
+    def make_exports(self):
+        try:
+            os.mkdir(EXPORT_DIR)
+        except FileExistsError:
+            messagebox.showinfo("Exports", "The exports folder already exists.", parent=self)
+        else:
+            backups.log_action(LOG_PATH, self.app.username, "Created exports folder")
+            messagebox.showinfo("Saved", "Exports folder created.", parent=self)
+
+    def remove_exports(self):
+        try:
+            os.rmdir(EXPORT_DIR)
+        except FileNotFoundError:
+            messagebox.showinfo("Exports", "There is no exports folder to remove.", parent=self)
+        except OSError:
+            messagebox.showwarning("Not empty", "The exports folder still has files in it, so it was kept.", parent=self)
+        else:
+            backups.log_action(LOG_PATH, self.app.username, "Removed empty exports folder")
+            messagebox.showinfo("Saved", "Exports folder removed.", parent=self)
+            
     def save(self):
         try:
             vat = float(self.vat.get())
@@ -4148,22 +4311,28 @@ class App(tk.Tk):
             self.logged_out = True
             self.destroy()
 
+def clear_image_caches():
+    """Cached PhotoImages die with the Tk window that made them, so empty both caches."""
+    _img_cache.clear()
+    _icon_cache.clear()
+
+
 def start():
     if os.environ.get("DEV"):                       # dev shortcut: skip login
         app = App(("admin", "admin", "Resort Manager"))
         app.mainloop()
         return
     while True:
-        _img_cache.clear()          # cached PhotoImages die with their Tk window
+        clear_image_caches()
         login = Login()
         login.mainloop()
+        clear_image_caches()        # the login window is gone, so its images are too
         if not login.user:          # login window closed without signing in
             break
         app = App(login.user)
         app.mainloop()
         if not app.logged_out:      # app window closed with the X button
             break
-
 
 if __name__ == "__main__":
     init_db()

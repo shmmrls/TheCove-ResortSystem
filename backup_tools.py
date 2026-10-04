@@ -24,7 +24,7 @@ def log_action(log_path, user, text):
     stamp = dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     try:
         with open(log_path, "a", encoding="utf-8") as fh:
-            fh.write(f"{stamp} | {user} | {text}\n")
+            fh.write("%s | %s | %s\n" % (stamp, user, text))    
     except OSError:
         pass                                    # logging must never break a booking
 
@@ -37,7 +37,23 @@ def read_log(log_path, limit=300):
         lines = fh.readlines()                  # read the whole file into a list
     return [ln.rstrip("\n") for ln in reversed(lines[-limit:])]
 
-
+def tail_log(log_path, limit=200, block=4096):
+    """Newest `limit` lines, newest first. Reads backwards from the end with seek() and tell()."""
+    if not os.path.exists(log_path):
+        return []
+    with open(log_path, "rb") as fh:
+        fh.seek(0, 2)                    # jump to the end of the file
+        pos = fh.tell()                  # file size in bytes
+        data = b""
+        while pos > 0 and data.count(b"\n") <= limit:
+            step = min(block, pos)
+            pos -= step
+            fh.seek(pos)                 # move back one block
+            data = fh.read(step) + data
+    lines = data.decode("utf-8", errors="replace").splitlines()
+    if pos > 0:
+        lines = lines[1:]                # the first line may be cut in half
+    return list(reversed(lines[-limit:]))
 # ------------------------------------------------------------ backups
 def list_backups(backup_dir, prefix="resort"):
     """Backup file names, oldest first (the timestamp in the name sorts correctly)."""

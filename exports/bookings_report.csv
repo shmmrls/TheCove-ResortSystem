@@ -1,0 +1,56 @@
+Ref,Guest,Room,Check-in,Check-out,Status,Promo,Total,Paid,Balance
+RB-00029,Nina Torres,402 Pool Villa,2026-07-17,2026-07-21,Checked-out,WELCOME10,52012.80,52012.80,0.00
+RB-00052,Juan Dela Cruz,102 Garden Room,2026-07-17,2026-07-21,Checked-out,,16856.00,16856.00,0.00
+RB-00025,Nina Torres,101 Garden Room,2026-07-21,2026-07-22,Checked-out,,5600.00,5600.00,0.00
+RB-00051,Bea Mendoza,502 Overwater Bungalow,2026-07-22,2026-07-25,Checked-out,,58828.00,58828.00,0.00
+RB-00020,Bea Mendoza,502 Overwater Bungalow,2026-07-28,2026-08-02,Checked-out,,102200.00,102200.00,0.00
+RB-00037,Carlo Bautista,203 Deluxe Sea View,2026-07-28,2026-07-30,Checked-out,WELCOME10,16531.20,16531.20,0.00
+RB-00018,Bea Mendoza,103 Garden Room,2026-08-01,2026-08-04,Checked-out,WELCOME10,12322.80,12322.80,0.00
+RB-00024,Paolo Garcia,402 Pool Villa,2026-08-02,2026-08-06,Checked-out,WELCOME10,48384.00,48384.00,0.00
+RB-00012,Mark Villanueva,103 Garden Room,2026-08-05,2026-08-07,Checked-out,,10528.00,10528.00,0.00
+RB-00043,Jomar Pascual,301 Family Cottage,2026-08-05,2026-08-10,Checked-out,,50456.00,50456.00,0.00
+RB-00041,Bea Mendoza,401 Pool Villa,2026-08-06,2026-08-11,Checked-out,,72016.00,72016.00,0.00
+RB-00050,Paolo Garcia,302 Family Cottage,2026-08-09,2026-08-14,Checked-out,,49504.00,49504.00,0.00
+RB-00049,Mark Villanueva,501 Overwater Bungalow,2026-08-17,2026-08-20,Checked-out,,54768.00,54768.00,0.00
+RB-00017,Nina Torres,502 Overwater Bungalow,2026-08-19,2026-08-22,Checked-out,WELCOME10,51634.80,51634.80,0.00
+RB-00038,Migo Fernandez,301 Family Cottage,2026-08-20,2026-08-21,Checked-out,,10864.00,10864.00,0.00
+RB-00002,Maria Santos,302 Family Cottage,2026-08-21,2026-08-23,Checked-out,,24584.00,24584.00,0.00
+RB-00011,Lea Castillo,301 Family Cottage,2026-08-22,2026-08-23,Checked-out,,13188.00,13188.00,0.00
+RB-00039,Trisha Navarro,301 Family Cottage,2026-08-22,2026-08-24,Checked-out,WELCOME10,19580.40,19580.40,0.00
+RB-00015,Trisha Navarro,302 Family Cottage,2026-08-23,2026-08-24,Checked-out,,9520.00,9520.00,0.00
+RB-00023,Lea Castillo,201 Deluxe Sea View,2026-08-23,2026-08-28,Checked-out,WELCOME10,27720.00,27720.00,0.00
+RB-00053,Sofia Ramirez,501 Overwater Bungalow,2026-08-23,2026-08-28,Checked-out,,86800.00,86800.00,0.00
+RB-00054,Migo Fernandez,402 Pool Villa,2026-08-26,2026-08-28,Checked-out,,34944.00,34944.00,0.00
+RB-00019,Jomar Pascual,402 Pool Villa,2026-08-28,2026-08-31,Checked-out,,49056.00,49056.00,0.00
+RB-00055,Angela Reyes,501 Overwater Bungalow,2026-08-31,2026-09-03,Checked-out,,56112.00,56112.00,0.00
+RB-00014,Ryan Aquino,201 Deluxe Sea View,2026-09-05,2026-09-10,Checked-out,,33516.00,33516.00,0.00
+RB-00042,Juan Dela Cruz,401 Pool Villa,2026-09-08,2026-09-09,Checked-out,,18256.00,18256.00,0.00
+RB-00007,Angela Reyes,101 Garden Room,2026-09-14,2026-09-16,Checked-out,WELCOME10,12499.20,12499.20,0.00
+RB-00026,Sofia Ramirez,202 Deluxe Sea View,2026-09-15,2026-09-16,Checked-out,,7056.00,7056.00,0.00
+RB-00046,Nina Torres,102 Garden Room,2026-09-15,2026-09-18,Checked-out,,20048.00,20048.00,0.00
+RB-00045,Angela Reyes,102 Garden Room,2026-09-17,2026-09-18,Checked-out,,3920.00,3920.00,0.00
+RB-00027,Carlo Bautista,402 Pool Villa,2026-09-20,2026-09-22,Checked-out,,37296.00,37296.00,0.00
+RB-00005,Nina Torres,301 Family Cottage,2026-09-21,2026-09-26,Checked-out,,51044.00,51044.00,0.00
+RB-00040,Juan Dela Cruz,502 Overwater Bungalow,2026-09-21,2026-09-24,Checked-out,,58128.00,58128.00,0.00
+RB-00004,Lea Castillo,102 Garden Room,2026-09-23,2026-09-25,Checked-out,,7840.00,7840.00,0.00
+RB-00021,Bea Mendoza,302 Family Cottage,2026-09-28,2026-09-30,Checked-out,,24304.00,24304.00,0.00
+RB-00016,Paolo Garcia,402 Pool Villa,2026-10-06,2026-10-07,Reserved,,20608.00,6182.40,14425.60
+RB-00034,Lea Castillo,203 Deluxe Sea View,2026-10-07,2026-10-10,Reserved,,19404.00,5821.20,13582.80
+RB-00044,Angela Reyes,201 Deluxe Sea View,2026-10-08,2026-10-10,Reserved,WELCOME10,15951.60,4785.48,11166.12
+RB-00048,Paolo Garcia,102 Garden Room,2026-10-08,2026-10-12,Reserved,WELCOME10,18799.20,5639.76,13159.44
+RB-00022,Jomar Pascual,103 Garden Room,2026-10-09,2026-10-12,Reserved,,14280.00,4284.00,9996.00
+RB-00028,Lea Castillo,202 Deluxe Sea View,2026-10-10,2026-10-11,Reserved,WELCOME10,7786.80,2336.04,5450.76
+RB-00035,Jomar Pascual,402 Pool Villa,2026-10-10,2026-10-12,Reserved,,35224.00,10567.20,24656.80
+RB-00036,Paolo Garcia,203 Deluxe Sea View,2026-10-10,2026-10-11,Reserved,,8260.00,2478.00,5782.00
+RB-00047,Mark Villanueva,203 Deluxe Sea View,2026-10-13,2026-10-18,Reserved,,33096.00,9928.80,23167.20
+RB-00031,Trisha Navarro,201 Deluxe Sea View,2026-10-15,2026-10-20,Reserved,,36008.00,10802.40,25205.60
+RB-00033,Angela Reyes,302 Family Cottage,2026-10-15,2026-10-20,Reserved,,50456.00,15136.80,35319.20
+RB-00013,Sofia Ramirez,502 Overwater Bungalow,2026-10-16,2026-10-17,Reserved,WELCOME10,20991.60,6297.48,14694.12
+RB-00030,Sofia Ramirez,301 Family Cottage,2026-10-18,2026-10-19,Reserved,,11760.00,3528.00,8232.00
+RB-00001,Carlo Bautista,301 Family Cottage,2026-10-19,2026-10-22,Reserved,,31248.00,9374.40,21873.60
+RB-00003,Jomar Pascual,402 Pool Villa,2026-10-20,2026-10-25,Reserved,,75320.00,22596.00,52724.00
+RB-00009,Mark Villanueva,402 Pool Villa,2026-10-25,2026-10-30,Reserved,,70448.00,21134.40,49313.60
+RB-00010,Lea Castillo,302 Family Cottage,2026-10-27,2026-10-30,Reserved,WELCOME10,30492.00,9147.60,21344.40
+RB-00008,Sofia Ramirez,501 Overwater Bungalow,2026-10-29,2026-10-30,Reserved,WELCOME10,15624.00,4687.20,10936.80
+RB-00006,Bea Mendoza,301 Family Cottage,2026-10-30,2026-10-31,Reserved,WELCOME10,18118.80,5435.64,12683.16
+RB-00032,Mark Villanueva,201 Deluxe Sea View,2026-10-30,2026-11-02,Reserved,,26152.00,7845.60,18306.40
