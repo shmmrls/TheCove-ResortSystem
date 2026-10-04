@@ -14,6 +14,7 @@ import math
 import shutil
 import sqlite3
 import hashlib
+import hmac
 import random
 import calendar as pycal
 import datetime as dt
@@ -45,6 +46,7 @@ RESORT = "The Cove RESORT"
 LOGO_PATH = os.path.join(ASSETS_DIR, "logo.png")  
 LOGO_WELCOME_PATH = os.path.join(ASSETS_DIR, "logo_welcome.png")  
 VAT = 0.12
+SENIOR_PWD_PCT = 20          # Senior citizen / PWD discount (%), VAT-exempt
 WEEKEND_MULT = 1.15          # Fri & Sat nights cost 15% more
 BACKUP_KEEP = 5
 DEFAULT_METHOD = "Cash"
@@ -115,8 +117,43 @@ def ref(bid):
     return f"RB-{int(bid):05d}"
 
 
-def hash_pw(p):
-    return hashlib.sha256(("azure_salt" + p).encode()).hexdigest()
+LEGACY_SALT = "azure_salt"          # only used to verify accounts made before this change
+
+
+def new_salt():
+    return os.urandom(16).hex()
+
+
+def hash_pw(p, salt=None):
+    """With a salt: PBKDF2. Without: the old fixed-salt hash, kept for legacy accounts."""
+    if salt is None:
+        return hashlib.sha256((LEGACY_SALT + p).encode()).hexdigest()
+    return hashlib.pbkdf2_hmac("sha256", p.encode(), bytes.fromhex(salt), 200_000).hex()
+
+
+def add_user(username, pw, role, fullname):
+    salt = new_salt()
+    ex("INSERT INTO users(username,password,role,fullname,salt) VALUES(?,?,?,?,?)",
+       (username, hash_pw(pw, salt), role, fullname, salt))
+
+
+def set_password(user_id, pw):
+    salt = new_salt()
+    ex("UPDATE users SET password=?, salt=? WHERE id=?", (hash_pw(pw, salt), salt, user_id))
+
+
+def check_login(username, pw):
+    """Returns the user row if the password is right, else None.
+    Old accounts (no salt yet) are checked the old way, then upgraded automatically."""
+    u = q1("SELECT id, username, role, fullname, password, salt FROM users WHERE username=?", (username,))
+    if not u:
+        return None
+    if u["salt"]:
+        return u if hmac.compare_digest(u["password"], hash_pw(pw, u["salt"])) else None
+    if hmac.compare_digest(u["password"], hash_pw(pw)):
+        set_password(u["id"], pw)
+        return u
+    return None
 
 
 def slug(t):
@@ -331,11 +368,14 @@ def init_db():
         min_nights INTEGER DEFAULT 0, note TEXT, created TEXT);
     CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY, value TEXT);
     """)
+    try:
+        conn.execute("ALTER TABLE users ADD COLUMN salt TEXT")
+        conn.commit()
+    except sqlite3.OperationalError:
+        pass                                   # column already exists
     if not q1("SELECT 1 FROM users"):
-        ex("INSERT INTO users(username,password,role,fullname) VALUES(?,?,?,?)",
-           ("admin", hash_pw("admin123"), "admin", "Resort Manager"))
-        ex("INSERT INTO users(username,password,role,fullname) VALUES(?,?,?,?)",
-           ("staff", hash_pw("staff123"), "staff", "Front Desk"))
+        add_user("admin", "admin123", "admin", "Resort Manager")
+        add_user("staff", "staff123", "staff", "Front Desk")
     if not q1("SELECT 1 FROM promos"):
         for code, pct, note in DEFAULT_PROMOS:
             conn.execute("INSERT INTO promos(code,percent,active,note,created) VALUES(?,?,?,?,?)",
@@ -379,6 +419,12 @@ def init_db():
         conn.commit()
     except sqlite3.OperationalError:
         pass                                   # column already exists
+    for col in ("disc_type TEXT", "disc_id TEXT"):
+        try:
+            conn.execute(f"ALTER TABLE bookings ADD COLUMN {col}")
+            conn.commit()
+        except sqlite3.OperationalError:
+            pass                               # column already exists
     conn.execute("UPDATE bookings SET actual_out=? WHERE status='Checked-out' "
                  "AND actual_out IS NULL AND check_out>?", (today().isoformat(), today().isoformat()))
     conn.commit()
@@ -441,14 +487,14 @@ def promo_pct(code):
 
 
 # ---------------------------------------------------------------- pricing
-def pricing(rate, ci, co, addons, pct):
+def pricing(rate, ci, co, addons, pct, vat_exempt=False):
     nights = (co - ci).days
     room = sum(rate * (WEEKEND_MULT if (ci + dt.timedelta(days=i)).weekday() in (4, 5) else 1.0)
                for i in range(nights))
     add = sum(qty * price for _, qty, price in addons)
     sub = room + add
     disc = sub * pct / 100
-    tax = (sub - disc) * VAT
+    tax = 0 if vat_exempt else (sub - disc) * VAT
     return {"nights": nights, "room": room, "addons": add, "discount": disc,
             "tax": tax, "total": sub - disc + tax}
 
@@ -472,7 +518,11 @@ def recalc_booking(bid):
     b = q1("SELECT * FROM bookings WHERE id=?", (bid,))
     addons = [(a["name"], a["qty"], a["price"]) for a in
               q("SELECT name,qty,price FROM booking_addons WHERE booking_id=?", (bid,))]
-    p = pricing(b["rate"], pdate(b["check_in"]), pdate(b["check_out"]), addons, promo_pct(b["promo"]))
+    ci, co = pdate(b["check_in"]), pdate(b["check_out"])
+    if b["disc_type"] in ("Senior", "PWD"):
+        p = pricing(b["rate"], ci, co, addons, SENIOR_PWD_PCT, vat_exempt=True)
+    else:
+        p = pricing(b["rate"], ci, co, addons, promo_pct(b["promo"]))
     ex("UPDATE bookings SET room_total=?,addons_total=?,discount=?,tax=?,total=? WHERE id=?",
        (p["room"], p["addons"], p["discount"], p["tax"], p["total"], bid))
 
@@ -1127,9 +1177,12 @@ def invoice_text(bid):
     out.append(f"{'Room x ' + str(n) + ' night(s)':<30}{money(b['room_total']):>18}")
     for a in addons:
         out.append(f"{(a['name'] + ' x' + str(a['qty']))[:30]:<30}{money(a['qty'] * a['price']):>18}")
+    special = b["disc_type"] or ""
     if b["discount"]:
-        out.append(f"{'Discount (' + (b['promo'] or '') + ')':<30}{'-' + money(b['discount']):>18}")
-    out.append(f"{vat_label():<30}{money(b['tax']):>18}")
+        label = (f"{special} disc {SENIOR_PWD_PCT:g}% ID:{b['disc_id']}" if special
+                 else f"Discount ({b['promo'] or ''})")
+        out.append(f"{label[:30]:<30}{'-' + money(b['discount']):>18}")
+    out.append(f"{('VAT (exempt)' if special else vat_label()):<30}{money(b['tax']):>18}")
     out += [line, f"{'TOTAL':<30}{money(b['total']):>18}", line, "Payments:"]
     for p in pays:
         out.append(f"  {p['date']}  {p['method']:<14}{money(p['amount']):>16}")
@@ -1335,19 +1388,19 @@ class Login(tk.Tk):
 
         btn(form, "Sign in", self.go, TEAL, WHITE, height=52, radius=26,
             font=(F, 12, "bold")).pack(fill="x")
-        tk.Label(form, text="admin / admin123   •   staff / staff123", font=(F, 9),
-                 bg=WHITE, fg=TEAL).pack(pady=(22, 0))
+        if os.environ.get("DEV_LOGIN_HINT"):
+            tk.Label(form, text="admin / admin123   •   staff / staff123", font=(F, 9),
+                     bg=WHITE, fg=TEAL).pack(pady=(22, 0))
 
         self.bind("<Return>", lambda e: self.go())
         self.bind("<Escape>", lambda e: self.destroy())
         self.e_user.focus()
 
     def go(self):
-        r = q1("SELECT username, role, fullname FROM users WHERE username=? AND password=?",
-               (self.e_user.get().strip(), hash_pw(self.e_pass.get())))
+        r = check_login(self.e_user.get().strip(), self.e_pass.get())
         if r:
             self.user = (r["username"], r["role"], r["fullname"])
-            backups.log_action(LOG_PATH, self.user[0], "Signed in") 
+            backups.log_action(LOG_PATH, self.user[0], "Signed in")
             self.destroy()
         else:
             messagebox.showerror("Sign in failed", "Wrong username or password.")
@@ -1616,7 +1669,13 @@ class BookingPage(Page):
         btn(pr, "Apply", self.apply_promo, TEAL, height=34).pack(side="left", padx=(8, 0))
         self.promo_msg = tk.Label(p, text="", bg=WHITE, font=(F, 9), anchor="w")
         self.promo_msg.pack(fill="x", pady=(0, 6))
-        self.promo.bind("<KeyRelease>", self.promo_edited)
+        self.promo.bind("<KeyRelease>", self.promo_edited)\
+    
+        tk.Label(p, text=f"Senior / PWD discount ({SENIOR_PWD_PCT:g}%)", bg=WHITE, fg=MUTED,
+                 font=(F, 9)).pack(anchor="w", pady=(4, 0))
+        self.special = Segmented(p, ["None", "Senior", "PWD"], "None", on_change=self.special_changed)
+        self.special.pack(fill="x", pady=(2, 6))
+        self.sp_id = lbl_entry(p, "Senior / PWD ID number (required if selected)")
 
         tk.Label(p, text="Deposit now (₱)", bg=WHITE, fg=MUTED, font=(F, 9)).pack(anchor="w")
         self.dep = ttk.Entry(p)
@@ -1795,6 +1854,22 @@ class BookingPage(Page):
                 out.append((a["name"], n, a["price"]))
         return out
 
+    def special_changed(self):
+        """Senior/PWD replaces any promo code (the two can't be combined)."""
+        if self.special.get() != "None":
+            self.promo.delete(0, "end")
+            self.promo_pct, self.promo_code = 0, ""
+            self.set_promo_msg("Senior / PWD discount replaces promo codes.", True)
+        else:
+            self.promo_msg.config(text="")
+        self.summary()
+
+    def current_pricing(self):
+        if self.special.get() != "None":
+            return pricing(self.sel_room["rate"], self.ci, self.co, self.addons(),
+                           SENIOR_PWD_PCT, vat_exempt=True)
+        return pricing(self.sel_room["rate"], self.ci, self.co, self.addons(), self.promo_pct)
+
     def set_promo_msg(self, text, ok=False):
         self.promo_msg.config(text=text, fg=TEAL if ok else DANGER)
 
@@ -1808,6 +1883,12 @@ class BookingPage(Page):
     def apply_promo(self):
         """Returns True if the box is empty or the code is valid and applied."""
         code = self.promo.get().strip().upper()
+        if code and self.special.get() != "None":
+            self.promo.delete(0, "end")
+            self.promo_pct, self.promo_code = 0, ""
+            self.set_promo_msg("Promo codes can't be combined with the Senior / PWD discount.")
+            self.summary()
+            return False
         if not code:
             self.promo_pct, self.promo_code = 0, ""
             self.promo_msg.config(text="")
@@ -1832,12 +1913,15 @@ class BookingPage(Page):
             self.sum_lbl.config(text="Select a room to see the price.")
             return
         r = self.sel_room
-        p = pricing(r["rate"], self.ci, self.co, self.addons(), self.promo_pct)
+        sp = self.special.get()
+        p = self.current_pricing()
         lines = [f"{r['name']} {r['number']}", f"{self.ci} -> {self.co} ({p['nights']} nights)",
                  "-" * 34, f"{'Room':<16}{money(p['room']):>18}", f"{'Add-ons':<16}{money(p['addons']):>18}"]
         if p["discount"]:
-            lines.append(f"{'Discount':<16}{'-' + money(p['discount']):>18}")
-        lines += [f"{vat_label():<16}{money(p['tax']):>18}", "-" * 34, f"{'TOTAL':<16}{money(p['total']):>18}"]
+            label = f"{sp} disc {SENIOR_PWD_PCT:g}%" if sp != "None" else "Discount"
+            lines.append(f"{label:<16}{'-' + money(p['discount']):>18}")
+        tax_label = "VAT exempt" if sp != "None" else vat_label()
+        lines += [f"{tax_label:<16}{money(p['tax']):>18}", "-" * 34, f"{'TOTAL':<16}{money(p['total']):>18}"]
         self.sum_lbl.config(text="\n".join(lines))
         if not self.touched:
             self.dep.delete(0, "end")
@@ -1881,7 +1965,12 @@ class BookingPage(Page):
                 self.summary()
                 return
             self.promo_pct = pct
-        p = pricing(self.sel_room["rate"], self.ci, self.co, self.addons(), self.promo_pct)
+        sp = self.special.get()
+        sp_id = self.sp_id.get().strip()
+        if sp != "None" and len(sp_id) < 3:
+            messagebox.showwarning("ID required", f"Enter the {sp} ID number to give this discount.", parent=self)
+            return
+        p = self.current_pricing()
         try:
             dep = float(self.dep.get() or 0)
         except ValueError:
@@ -1901,20 +1990,24 @@ class BookingPage(Page):
         else:
             gid = ex("INSERT INTO guests(name,phone,email,created) VALUES(?,?,?,?)",
                      (name, phone, self.g_email.get().strip(), today().isoformat())).lastrowid
-        promo = self.promo_code if self.promo_pct else ""
+        promo = self.promo_code if (self.promo_pct and sp == "None") else ""
         bid = ex("INSERT INTO bookings(guest_id,room_id,check_in,check_out,adults,children,status,rate,"
-                 "room_total,addons_total,discount,tax,total,promo,notes,created,staff) "
-                 "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                 "room_total,addons_total,discount,tax,total,promo,notes,created,staff,disc_type,disc_id) "
+                 "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                  (gid, self.sel_room["id"], self.ci.isoformat(), self.co.isoformat(), adults,
                   kids, "Reserved", self.sel_room["rate"], p["room"], p["addons"],
                   p["discount"], p["tax"], p["total"], promo, self.notes.get().strip(),
-                  today().isoformat(), self.app.username)).lastrowid
+                  today().isoformat(), self.app.username,
+                  "" if sp == "None" else sp, "" if sp == "None" else sp_id)).lastrowid
         for n, qt, pz in self.addons():
             conn.execute("INSERT INTO booking_addons(booking_id,name,qty,price) VALUES(?,?,?,?)", (bid, n, qt, pz))
         if dep > 0:
             conn.execute("INSERT INTO payments(booking_id,amount,method,kind,date,staff) VALUES(?,?,?,?,?,?)",
                          (bid, dep, self.method.get(), "Deposit", today().isoformat(), self.app.username))
         conn.commit()
+        if sp != "None":
+            backups.log_action(LOG_PATH, self.app.username,
+                               f"{sp} discount ({SENIOR_PWD_PCT:g}%, VAT-exempt) applied on {ref(bid)}")
         show_invoice(self.app, bid)
         self.app.show("res")          # go to the Reservations list
 
@@ -2014,6 +2107,13 @@ class RoomDialog(FormDialog):
         except sqlite3.IntegrityError:
             messagebox.showerror("Duplicate", "That room number already exists.", parent=self)
             return
+        if self.room:
+            msg = f"Edited Room {vals[0]} ({vals[1]}), rate {money(vals[3])}"
+            if self.room["status"] != self.status.get():
+                msg += f", status {self.room['status']} -> {self.status.get()}"
+        else:
+            msg = f"Added Room {vals[0]} ({vals[1]}), rate {money(vals[3])}"
+        backups.log_action(LOG_PATH, self.page.app.username, msg)
         self.destroy()
         self.page.refresh()
  
@@ -2024,6 +2124,8 @@ class RoomDialog(FormDialog):
         if confirm_delete(self, "room", f"Delete Room {self.room['number']} ({self.room['name']})? "
                                         "This action cannot be undone."):
             ex("DELETE FROM rooms WHERE id=?", (self.room["id"],))
+            backups.log_action(LOG_PATH, self.page.app.username,
+                               f"Deleted Room {self.room['number']} ({self.room['name']})")
             self.destroy()
             self.page.refresh()
 
@@ -2471,18 +2573,25 @@ def stat_row(parent, items):
         tk.Label(cell, text=v, bg=SEAFOAM, fg=INK, font=(F, 10, "bold")).pack(anchor="w")
 
 class Segmented(tk.Frame):
-    """Row of pill buttons, one selected. Use .get() like an Entry."""
+    """Row of pill buttons, one selected. Use .get() like an Entry.
+    on_change (optional) is called when the user clicks a different option."""
 
-    def __init__(self, parent, options, value=None, bg=WHITE):
+    def __init__(self, parent, options, value=None, bg=WHITE, on_change=None):
         super().__init__(parent, bg=bg)
-        self.value, self.b = value or options[0], {}
+        self.value, self.b, self.on_change = value or options[0], {}, on_change
         for i, o in enumerate(options):
             self.grid_columnconfigure(i, weight=1, uniform="seg")
-            b = RButton(self, o, lambda o=o: self.set(o), color="#E7EEEF", fg=INK, height=36,
+            b = RButton(self, o, lambda o=o: self.pick(o), color="#E7EEEF", fg=INK, height=36,
                         radius=10, font=(F, 9, "bold"), padx=6, bg=bg)
             b.grid(row=0, column=i, sticky="ew", padx=2)
             self.b[o] = b
         self.set(self.value)
+
+    def pick(self, v):
+        changed = v != self.value
+        self.set(v)
+        if changed and self.on_change:
+            self.on_change()
 
     def set(self, v):
         self.value = v
@@ -2793,7 +2902,8 @@ class BookingDetailDialog(Dialog):
  
         cell(0, 0, "🛏", "Room", f"{b['room_no']} • {b['room_type']}")
         cell(0, 1, "👥", "Guests", f"{b['adults']} adult(s), {b['children']} child(ren)")
-        cell(1, 0, "🏷", "Promo", b["promo"] or "None")
+        cell(1, 0, "🏷", "Discount",
+             f"{b['disc_type']} {SENIOR_PWD_PCT:g}%" if b["disc_type"] else (b["promo"] or "None"))
         cell(1, 1, "₱", "Nightly rate", f"{money(b['rate'])}")
         if b["notes"]:
             cell(2, 0, "💬", "Requests", b["notes"], span=2)
@@ -2808,8 +2918,9 @@ class BookingDetailDialog(Dialog):
         for a in addons:
             lines.append((f"{a['name']} × {a['qty']}", money(a["qty"] * a["price"]), INK))
         if b["discount"]:
-            lines.append((f"Discount ({b['promo']})", "−" + money(b["discount"]), TEAL))
-        lines.append((vat_label(), money(b["tax"]), INK))
+            dlabel = f"{b['disc_type']} discount" if b["disc_type"] else f"Discount ({b['promo']})"
+            lines.append((dlabel, "−" + money(b["discount"]), TEAL))
+        lines.append(("VAT (exempt)" if b["disc_type"] else vat_label(), money(b["tax"]), INK))
         for i, (k, v, col) in enumerate(lines):
             tk.Label(led, text=k, bg=WHITE, fg=MUTED, font=(F, 10), anchor="w").grid(row=i, column=0, sticky="w", pady=2)
             tk.Label(led, text=v, bg=WHITE, fg=col, font=(F, 10), anchor="e").grid(row=i, column=1, sticky="e", pady=2)
@@ -3103,9 +3214,16 @@ class GuestDialog(FormDialog):
              self.notes.get().strip(), 1 if self.vip.get() == "★ VIP" else 0)
         if self.g:
             ex("UPDATE guests SET name=?,phone=?,email=?,address=?,id_no=?,notes=?,vip=? WHERE id=?", v + (self.g["id"],))
+            msg = f"Edited guest {n}"
+            if self.g["name"] != n:
+                msg = f"Edited guest {self.g['name']} (renamed to {n})"
+            if bool(self.g["vip"]) != bool(v[6]):
+                msg += " - VIP on" if v[6] else " - VIP off"
         else:
             ex("INSERT INTO guests(name,phone,email,address,id_no,notes,vip,created) VALUES(?,?,?,?,?,?,?,?)",
                v + (today().isoformat(),))
+            msg = f"Added guest {n}"
+        backups.log_action(LOG_PATH, self.page.app.username, msg)
         self.destroy()
         self.page.refresh()
 
@@ -3192,6 +3310,7 @@ class GuestsPage(Page):
             return
         if confirm_delete(self, "guest", f"Delete {g['name']}? This action cannot be undone."):
             ex("DELETE FROM guests WHERE id=?", (g["id"],))
+            backups.log_action(LOG_PATH, self.app.username, f"Deleted guest {g['name']}")
             self.refresh()
 
 
@@ -3239,16 +3358,25 @@ class HousekeepingPage(Page):
     def set_hk(self, v):
         r = self.rid()
         if r:
+            room = q1("SELECT number, hk FROM rooms WHERE id=?", (r,))
+            if room["hk"] == v:                  # nothing changed, nothing to log
+                return
             ex("UPDATE rooms SET hk=? WHERE id=?", (v, r))
+            backups.log_action(LOG_PATH, self.app.username,
+                               f"Housekeeping: Room {room['number']} {room['hk']} -> {v}")
             self.refresh()
 
     def toggle_maint(self):
         r = self.rid()
         if r:
-            cur = q1("SELECT status FROM rooms WHERE id=?", (r,))["status"]
+            room = q1("SELECT number, status FROM rooms WHERE id=?", (r,))
+            cur = room["status"]
             if cur != "Maintenance" and not can_set_maintenance(self, r):
                 return
-            ex("UPDATE rooms SET status=? WHERE id=?", ("Active" if cur == "Maintenance" else "Maintenance", r))
+            new = "Active" if cur == "Maintenance" else "Maintenance"
+            ex("UPDATE rooms SET status=? WHERE id=?", (new, r))
+            backups.log_action(LOG_PATH, self.app.username,
+                               f"Room {room['number']} {'set to Maintenance' if new == 'Maintenance' else 'back to Active'}")
             self.refresh()
 
 
@@ -3615,6 +3743,44 @@ class ReportsPage(Page):
         btn(d.body, "Close", d.destroy, TINT["ocean"], INK, height=36).pack(fill="x", pady=(12, 0))
 
 # ------------------------------------------------------------ staff (admin)
+class ChangePasswordDialog(FormDialog):
+    def __init__(self, app):
+        super().__init__(app, "Change password", "🔒", "Change my password", f"@{app.username}",
+                         tint=TINT["ocean"], fg=OCEAN)
+        self.app = app
+
+        card = self.panel("Password")
+        g = form_grid(card)
+        self.cur = grid_entry(g, 0, 0, "Current password *", show="•", span=2)
+        self.pw1 = grid_entry(g, 1, 0, "New password *", show="•")
+        self.pw2 = grid_entry(g, 1, 1, "Confirm new password *", show="•")
+        hint(card, "At least 6 characters")
+
+        self.footer("Save password", self.save)
+        self.finish()
+        self.cur.focus_set()
+
+    def save(self):
+        cur, pw1, pw2 = self.cur.get(), self.pw1.get(), self.pw2.get()
+        user = check_login(self.app.username, cur)
+        if not user:
+            messagebox.showwarning("Password", "Your current password is not correct.", parent=self)
+            return
+        if len(pw1) < 6:
+            messagebox.showwarning("Password", "Password must be at least 6 characters.", parent=self)
+            return
+        if pw1 != pw2:
+            messagebox.showwarning("Password", "The two new passwords do not match.", parent=self)
+            return
+        if pw1 == cur:
+            messagebox.showwarning("Password", "Choose a password different from the current one.", parent=self)
+            return
+        set_password(user["id"], pw1)
+        backups.log_action(LOG_PATH, self.app.username, "Changed own password")
+        self.destroy()
+        messagebox.showinfo("Saved", "Your password has been changed.", parent=self.app)
+
+
 class StaffDialog(FormDialog):
     def __init__(self, page, u=None):
         super().__init__(page, "Edit staff" if u else "Add staff", "🔑",
@@ -3674,11 +3840,10 @@ class StaffDialog(FormDialog):
                 return
             ex("UPDATE users SET fullname=?, role=? WHERE id=?", (full, role, self.u["id"]))
             if pw:
-                ex("UPDATE users SET password=? WHERE id=?", (hash_pw(pw), self.u["id"]))
+                set_password(self.u["id"], pw)
         else:
             try:
-                ex("INSERT INTO users(username,password,role,fullname) VALUES(?,?,?,?)",
-                   (uname, hash_pw(pw), role, full))
+                add_user(uname, pw, role, full)
             except sqlite3.IntegrityError:
                 messagebox.showerror("Duplicate", "That username is already taken.", parent=self)
                 return
@@ -3953,7 +4118,9 @@ class App(tk.Tk):
         info.pack(side="left", padx=10)
         tk.Label(info, text=self.fullname, bg=OCEAN2, fg=WHITE, font=(F, 10, "bold")).pack(anchor="w")
         tk.Label(info, text=self.role.capitalize(), bg=OCEAN2, fg="#A9C6CB", font=(F, 8)).pack(anchor="w")
-        btn(foot.body, "Sign out", self.logout, CREAM, INK, height=32).pack(fill="x", pady=(10, 0))
+        btn(foot.body, "Change password", lambda: ChangePasswordDialog(self), AQUA, INK,
+            height=32).pack(fill="x", pady=(10, 0))
+        btn(foot.body, "Sign out", self.logout, CREAM, INK, height=32).pack(fill="x", pady=(8, 0))
         self.logged_out = False
         self.current = None
         self.show("dash")
