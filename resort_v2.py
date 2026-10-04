@@ -20,6 +20,7 @@ import datetime as dt
 import uuid
 import tkinter as tk
 import tkinter.font as tkfont
+import backup_tools as backups
 from tkinter import ttk, messagebox, filedialog
 
 
@@ -36,6 +37,8 @@ BASE = os.path.dirname(os.path.abspath(__file__))
 IMG_DIR = os.path.join(BASE, "resort_images")
 ASSETS_DIR = os.path.join(BASE, "assets") 
 DB_PATH = os.path.join(BASE, "resort.db")
+BACKUP_DIR = os.path.join(BASE, "backups")
+LOG_PATH = os.path.join(BASE, "activity.log")
 os.makedirs(IMG_DIR, exist_ok=True)
 
 RESORT = "The Cove RESORT"
@@ -43,6 +46,8 @@ LOGO_PATH = os.path.join(ASSETS_DIR, "logo.png")
 LOGO_WELCOME_PATH = os.path.join(ASSETS_DIR, "logo_welcome.png")  
 VAT = 0.12
 WEEKEND_MULT = 1.15          # Fri & Sat nights cost 15% more
+BACKUP_KEEP = 5
+DEFAULT_METHOD = "Cash"
 DEFAULT_PROMOS = [("WELCOME10", 10, "Welcome offer for first-time guests"),
                   ("SUMMER15", 15, "Summer season discount"),
                   ("VIP20", 20, "For VIP guests")]
@@ -94,6 +99,9 @@ def ex(sql, args=()):
 def money(x):
     return f"₱{float(x):,.2f}"
 
+def vat_label():
+    """Text for the VAT line on invoices and summaries, e.g. 'VAT 12%'."""
+    return f"VAT {VAT * 100:g}%"
 
 def today():
     return dt.date.today()
@@ -321,6 +329,7 @@ def init_db():
     CREATE TABLE IF NOT EXISTS promos(id INTEGER PRIMARY KEY, code TEXT UNIQUE, percent REAL,
         active INTEGER DEFAULT 1, expires TEXT, max_uses INTEGER DEFAULT 0,
         min_nights INTEGER DEFAULT 0, note TEXT, created TEXT);
+    CREATE TABLE IF NOT EXISTS settings(key TEXT PRIMARY KEY, value TEXT);
     """)
     if not q1("SELECT 1 FROM users"):
         ex("INSERT INTO users(username,password,role,fullname) VALUES(?,?,?,?)",
@@ -374,6 +383,19 @@ def init_db():
                  "AND actual_out IS NULL AND check_out>?", (today().isoformat(), today().isoformat()))
     conn.commit()
 
+def load_settings():
+    """Read the settings table into the module-level constants.
+    These names are assigned here, not just read, so they must be declared `global`."""
+    global VAT, WEEKEND_MULT, BACKUP_KEEP, DEFAULT_METHOD
+    saved = {r["key"]: r["value"] for r in q("SELECT key, value FROM settings")}
+    try:
+        VAT = float(saved.get("vat", 12)) / 100
+        WEEKEND_MULT = 1 + float(saved.get("weekend", 15)) / 100
+        BACKUP_KEEP = int(float(saved.get("keep", 5)))
+    except ValueError:
+        pass                                    # junk in the table: keep the current values
+    method = saved.get("pay_method", "Cash")
+    DEFAULT_METHOD = method if method in METHODS else "Cash"
 
 BOOKING_SQL = """
 SELECT b.*, g.name AS guest, g.phone AS phone, r.number AS room_no, r.name AS room_type,
@@ -1017,7 +1039,7 @@ def grid_cell(g, row, col, label, span=1):
     """A labelled slot in the form grid. Returns the frame to put your widget in."""
     px = (0, 0) if span == 2 else ((0, 6) if col == 0 else (6, 0))
     cell = tk.Frame(g, bg=WHITE)
-    cell.grid(row=row, column=col, columnspan=span, sticky="ew", padx=px, pady=(0, 10))
+    cell.grid(row=row, column=col, columnspan=span, sticky="new", padx=px, pady=(0, 10))
     tk.Label(cell, text=label, bg=WHITE, fg=MUTED, font=(F, 9), anchor="w").pack(fill="x", pady=(0, 3))
     return cell
  
@@ -1107,7 +1129,7 @@ def invoice_text(bid):
         out.append(f"{(a['name'] + ' x' + str(a['qty']))[:30]:<30}{money(a['qty'] * a['price']):>18}")
     if b["discount"]:
         out.append(f"{'Discount (' + (b['promo'] or '') + ')':<30}{'-' + money(b['discount']):>18}")
-    out.append(f"{'VAT 12%':<30}{money(b['tax']):>18}")
+    out.append(f"{vat_label():<30}{money(b['tax']):>18}")
     out += [line, f"{'TOTAL':<30}{money(b['total']):>18}", line, "Payments:"]
     for p in pays:
         out.append(f"  {p['date']}  {p['method']:<14}{money(p['amount']):>16}")
@@ -1325,6 +1347,7 @@ class Login(tk.Tk):
                (self.e_user.get().strip(), hash_pw(self.e_pass.get())))
         if r:
             self.user = (r["username"], r["role"], r["fullname"])
+            backups.log_action(LOG_PATH, self.user[0], "Signed in") 
             self.destroy()
         else:
             messagebox.showerror("Sign in failed", "Wrong username or password.")
@@ -1601,7 +1624,7 @@ class BookingPage(Page):
         self.dep.bind("<KeyRelease>", lambda e: setattr(self, "touched", True))
         tk.Label(p, text="Payment method", bg=WHITE, fg=MUTED, font=(F, 9)).pack(anchor="w")
         self.method = ttk.Combobox(p, values=METHODS, state="readonly")
-        self.method.set("Cash")
+        self.method.set(DEFAULT_METHOD)
         self.method.pack(fill="x", pady=(2, 8))
         self.notes = lbl_entry(p, "Special requests")
 
@@ -1814,7 +1837,7 @@ class BookingPage(Page):
                  "-" * 34, f"{'Room':<16}{money(p['room']):>18}", f"{'Add-ons':<16}{money(p['addons']):>18}"]
         if p["discount"]:
             lines.append(f"{'Discount':<16}{'-' + money(p['discount']):>18}")
-        lines += [f"{'VAT 12%':<16}{money(p['tax']):>18}", "-" * 34, f"{'TOTAL':<16}{money(p['total']):>18}"]
+        lines += [f"{vat_label():<16}{money(p['tax']):>18}", "-" * 34, f"{'TOTAL':<16}{money(p['total']):>18}"]
         self.sum_lbl.config(text="\n".join(lines))
         if not self.touched:
             self.dep.delete(0, "end")
@@ -2300,6 +2323,7 @@ class BookingsPage(Page):
                        no="Cancel", icon="🔑", detail=detail):
             return
         ex("UPDATE bookings SET status='Checked-in' WHERE id=?", (bid,))
+        backups.log_action(LOG_PATH, self.app.username, f"Checked in {ref(bid)} ({b['guest']})")
         self.load()
 
     def check_out(self, bid=None):
@@ -2335,6 +2359,7 @@ class BookingsPage(Page):
         else:
             ex("UPDATE bookings SET status='Checked-out' WHERE id=?", (bid,))
         ex("UPDATE rooms SET hk='Dirty' WHERE id=?", (b["room_id"],))
+        backups.log_action(LOG_PATH, self.app.username, f"Checked out {ref(bid)} ({b['guest']})")
         self.load()
         show_invoice(self.app, bid)
 
@@ -2402,7 +2427,9 @@ class BookingsPage(Page):
             if refund > 0:
                 ex("INSERT INTO payments(booking_id,amount,method,kind,date,staff) VALUES(?,?,?,?,?,?)",
                    (bid, -refund, "Refund", "Refund", today().isoformat(), self.app.username))
+                backups.log_action(LOG_PATH, self.app.username, f"Refunded {money(refund)} on {ref(bid)}")
             ex("UPDATE bookings SET status='Cancelled', total=? WHERE id=?", (penalty, bid))
+            backups.log_action(LOG_PATH, self.app.username, f"Cancelled {ref(bid)} ({b['guest']})")
             self.load()
 
 def dialog_header(parent, icon, title, sub="", tint=None, fg=TEAL, dy=-2):
@@ -2478,7 +2505,7 @@ class PaymentDialog(Dialog):
                         ("Balance", money(b["total"] - b["paid"]))])
         self.amt = lbl_entry(body, "Amount (₱)", f"{default:.2f}")
         tk.Label(body, text="Method", bg=WHITE, fg=MUTED, anchor="w", font=(F, 9)).pack(fill="x")
-        self.m = Segmented(body, METHODS, "Cash")
+        self.m = Segmented(body, METHODS, DEFAULT_METHOD)
         self.m.pack(fill="x", pady=(4, 0))
         dialog_buttons(body, "Save payment", self.save, self.destroy)
         self.bind("<Return>", lambda e: self.save())
@@ -2492,6 +2519,8 @@ class PaymentDialog(Dialog):
             return
         ex("INSERT INTO payments(booking_id,amount,method,kind,date,staff) VALUES(?,?,?,?,?,?)",
            (self.bid, a, self.m.get(), "Payment", today().isoformat(), self.master.app.username))
+        backups.log_action(LOG_PATH, self.master.app.username,
+                           f"Payment {money(a)} ({self.m.get()}) on {ref(self.bid)}")
         self.result = True
         self.destroy()
 
@@ -2545,6 +2574,8 @@ class ChargeDialog(Dialog):
         ex("INSERT INTO booking_addons(booking_id,name,qty,price) VALUES(?,?,?,?)",
            (self.bid, a["name"], int(self.qty.get()), a["price"]))
         recalc_booking(self.bid)
+        backups.log_action(LOG_PATH, self.master.app.username,
+                           f"Added charge {a['name']} x{int(self.qty.get())} to {ref(self.bid)}")
         self.result = True
         self.destroy()
 
@@ -2621,6 +2652,9 @@ class DatesDialog(Dialog):
             return
         ex("UPDATE bookings SET check_in=?, check_out=? WHERE id=?", (ci.isoformat(), co.isoformat(), self.b["id"]))
         recalc_booking(self.b["id"])
+        backups.log_action(LOG_PATH, self.master.app.username,
+                           f"Changed dates of {ref(self.b['id'])}: {self.b['check_in']} to {self.b['check_out']}"
+                           f" -> {ci.isoformat()} to {co.isoformat()}")
         self.result = True
         self.destroy()
 
@@ -2665,6 +2699,8 @@ class MoveDialog(Dialog):
         r = self.rooms[self.c.current()]
         ex("UPDATE bookings SET room_id=?, rate=? WHERE id=?", (r["id"], r["rate"], self.b["id"]))
         recalc_booking(self.b["id"])
+        backups.log_action(LOG_PATH, self.master.app.username,
+                           f"Moved {ref(self.b['id'])} from Room {self.b['room_no']} to Room {r['number']}")
         self.result = True
         self.destroy()
 
@@ -2773,7 +2809,7 @@ class BookingDetailDialog(Dialog):
             lines.append((f"{a['name']} × {a['qty']}", money(a["qty"] * a["price"]), INK))
         if b["discount"]:
             lines.append((f"Discount ({b['promo']})", "−" + money(b["discount"]), TEAL))
-        lines.append(("VAT 12%", money(b["tax"]), INK))
+        lines.append((vat_label(), money(b["tax"]), INK))
         for i, (k, v, col) in enumerate(lines):
             tk.Label(led, text=k, bg=WHITE, fg=MUTED, font=(F, 10), anchor="w").grid(row=i, column=0, sticky="w", pady=2)
             tk.Label(led, text=v, bg=WHITE, fg=col, font=(F, 10), anchor="e").grid(row=i, column=1, sticky="e", pady=2)
@@ -3291,6 +3327,8 @@ class PromoDialog(FormDialog):
         except sqlite3.IntegrityError:
             messagebox.showerror("Duplicate", "That promo code already exists.", parent=self)
             return
+        backups.log_action(LOG_PATH, self.page.app.username,
+                           f"{'Edited' if self.p else 'Created'} promo code {code} ({pct:g}%)")
         self.destroy()
         self.page.refresh()
 
@@ -3354,6 +3392,8 @@ class PromoPage(Page):
         p = self.sel()
         if p:
             ex("UPDATE promos SET active=? WHERE id=?", (0 if p["active"] else 1, p["id"]))
+            backups.log_action(LOG_PATH, self.app.username,
+                               f"{'Disabled' if p['active'] else 'Enabled'} promo code {p['code']}")
             self.refresh()
 
     def copy(self):
@@ -3373,8 +3413,56 @@ class PromoPage(Page):
         if confirm_delete(self, "promo code", f"Delete promo code {p['code']}? "
                                         "This action cannot be undone."):
             ex("DELETE FROM promos WHERE id=?", (p["id"],))
+            backups.log_action(LOG_PATH, self.app.username, f"Deleted promo code {p['code']}")
             self.refresh()
 
+
+class RestoreDialog(Dialog):
+    def __init__(self, page):
+        super().__init__(page, "Restore backup")
+        self.page = page
+        body = self.body
+        tk.Frame(body, bg=WHITE, width=480, height=1).pack()
+        dialog_header(body, "♻", "Restore a backup", "Replaces the current data with a saved copy",
+                      TINT["coral"], "#9A6B00", dy=-3)
+        names = backups.list_backups(BACKUP_DIR)[::-1]                    # newest first
+        if not names:
+            info_box(body, "No backups yet. Click 'Backup database' first.")
+            btn(body, "Close", self.destroy, "#E7EEEF", INK, height=40).pack(fill="x")
+            return
+        f, self.tree = make_tree(body, ("file", "made", "size"), ("Backup", "Created", "Size"),
+                                 (210, 150, 80), 6, natural=True)
+        f.pack(fill="both", expand=True)
+        for n in names:
+            p = os.path.join(BACKUP_DIR, n)
+            made = dt.datetime.fromtimestamp(os.path.getmtime(p)).strftime("%Y-%m-%d %H:%M")
+            self.tree.insert("", "end", iid=n, values=(n, made, f"{os.path.getsize(p) / 1024:,.0f} KB"))
+        self.tree.selection_set(names[0])
+        dialog_buttons(body, "Restore selected", self.go, self.destroy, DANGER)
+
+    def go(self):
+        sel = self.tree.selection()
+        if not sel:
+            messagebox.showinfo("Select", "Select a backup first.", parent=self)
+            return
+        name = sel[0]
+        if not confirm(self, "Restore this backup?",
+                       "Everything entered since this backup was made will be lost, including bookings, "
+                       "payments and staff accounts. A safety copy of the current data is saved first.",
+                       yes="Restore", no="Cancel", icon="⚠", danger=True, detail=name):
+            return
+        try:
+            safety = backups.restore_backup(conn, BACKUP_DIR, name)
+        except backups.BackupError as e:                  # also catches RestoreError
+            messagebox.showerror("Restore failed", str(e), parent=self)
+            return
+        init_db()                                    # adds any columns an older backup is missing
+        load_settings()                               # reloads settings that may have been changed
+        backups.log_action(LOG_PATH, self.page.app.username,
+                      f"Restored database from {name} (safety copy: {os.path.basename(safety)})")
+        self.destroy()
+        messagebox.showinfo("Saved", "Backup restored.", parent=self.page)
+        self.page.app.refresh_current()
 
 # ------------------------------------------------------------ reports
 class ReportsPage(Page):
@@ -3394,6 +3482,9 @@ class ReportsPage(Page):
         self.rt.bind("<<ComboboxSelected>>", lambda e: self.draw())
         btn(top, "Refresh", self.draw, TEAL, height=34).pack(side="left", padx=6)
         btn(top, "Export bookings CSV", self.export, GOLD, INK, height=34).pack(side="left")
+        btn(top, "Backup database", self.backup, TEAL, height=34).pack(side="left", padx=(6, 0))
+        btn(top, "Activity log", self.show_log, OCEAN, height=34).pack(side="left", padx=6)
+        btn(top, "Restore backup", lambda: RestoreDialog(self), "#6D9DC5", height=34).pack(side="left")
         row = tk.Frame(self, bg=BG)
         row.pack(fill="x", padx=20, pady=(12, 0))
         self.k = []
@@ -3498,6 +3589,30 @@ class ReportsPage(Page):
                             f"{b['total'] - b['paid']:.2f}"])
         messagebox.showinfo("Saved", "Report exported.")
 
+    def backup(self):
+        try:
+            path = backups.make_backup(conn, BACKUP_DIR, keep=BACKUP_KEEP)
+        except backups.BackupError as e:
+            messagebox.showerror("Backup failed", str(e), parent=self)
+            return
+        name = os.path.basename(path)
+        backups.log_action(LOG_PATH, self.app.username, f"Backed up database to {name}")
+        messagebox.showinfo("Saved", f"Backup created: {name}\nThe {BACKUP_KEEP} newest backups are kept.", parent=self)
+
+    def show_log(self):
+        d = Dialog(self, "Activity log")
+        tk.Label(d.body, text="Activity log", font=(F, 14, "bold"), bg=WHITE, fg=INK).pack(anchor="w", pady=(0, 10))
+        box = tk.Frame(d.body, bg=WHITE)
+        box.pack(fill="both", expand=True)
+        t = tk.Text(box, font=("Consolas", 9), bd=0, bg=WHITE, fg=INK, width=80, height=22,
+                    padx=10, pady=10, wrap="none")
+        sb = ttk.Scrollbar(box, orient="vertical", command=t.yview)
+        t.configure(yscrollcommand=sb.set)
+        t.pack(side="left", fill="both", expand=True)
+        sb.pack(side="right", fill="y")
+        t.insert("1.0", "\n".join(backups.read_log(LOG_PATH)) or "No activity recorded yet.")
+        t.config(state="disabled")
+        btn(d.body, "Close", d.destroy, TINT["ocean"], INK, height=36).pack(fill="x", pady=(12, 0))
 
 # ------------------------------------------------------------ staff (admin)
 class StaffDialog(FormDialog):
@@ -3567,6 +3682,10 @@ class StaffDialog(FormDialog):
             except sqlite3.IntegrityError:
                 messagebox.showerror("Duplicate", "That username is already taken.", parent=self)
                 return
+        who = self.u["username"] if self.u else uname
+        backups.log_action(LOG_PATH, self.page.app.username,
+                           f"{'Edited' if self.u else 'Created'} staff account '{who}' ({role})"
+                           + (" - password reset" if (pw and self.u) else ""))
         self.destroy()
         self.page.refresh()
 
@@ -3634,8 +3753,144 @@ class StaffPage(Page):
         if confirm_delete(self, "account", f"Delete the account '{u['username']}'? "
                                    "Their past bookings and payments are kept."):
             ex("DELETE FROM users WHERE id=?", (u["id"],))
+            backups.log_action(LOG_PATH, self.app.username, f"Deleted staff account '{u['username']}'")
             self.refresh()
 
+class SettingsPage(Page):
+    def __init__(self, app):
+        super().__init__(app)
+        head = page_title(self, "Settings", "Pricing rules, defaults and the add-on price list")
+        btn(head, "Save settings", self.save, CORAL).pack(side="right")
+ 
+        body = tk.Frame(self, bg=BG)
+        body.pack(fill="both", expand=True, padx=26, pady=(0, 18))
+        body.grid_columnconfigure((0, 1), weight=1, uniform="set")
+        body.grid_rowconfigure(0, weight=1)
+        left = Card(body, pad=16)
+        left.grid(row=0, column=0, sticky="nsew", padx=(0, 7))
+        right = Card(body, pad=16)
+        right.grid(row=0, column=1, sticky="nsew", padx=(7, 0))
+ 
+        def group(parent, title, **pack):
+            lf = tk.LabelFrame(parent, text=f" {title} ", bg=WHITE, fg=TEAL,
+                               font=(F, 9, "bold"), padx=14, pady=10)
+            lf.pack(fill=pack.get("fill", "x"), expand=pack.get("expand", False), pady=(0, 12))
+            return lf
+ 
+        # ---- left: pricing / backups / default payment method (LabelFrames)
+        g = group(left.body, "Pricing")
+        self.vat = lbl_entry(g, "VAT (%)")
+        self.weekend = lbl_entry(g, "Weekend surcharge for Fri & Sat nights (%)")
+ 
+        g = group(left.body, "Backups")
+        self.keep = lbl_entry(g, "Number of backups to keep")
+ 
+        g = group(left.body, "Default payment method")
+        self.method_var = tk.StringVar(value=DEFAULT_METHOD)
+        for m in METHODS:                       # Radiobuttons share one variable: only one can be on
+            tk.Radiobutton(g, text=m, variable=self.method_var, value=m, bg=WHITE, fg=INK,
+                           activebackground=WHITE, selectcolor=WHITE, font=(F, 10),
+                           anchor="w", cursor="hand2").pack(fill="x")
+ 
+        # ---- right: add-on price list (Listbox)
+        g = group(right.body, "Add-ons & activities", fill="both", expand=True)
+        box = tk.Frame(g, bg=WHITE)
+        box.pack(fill="both", expand=True)
+        self.lb = tk.Listbox(box, font=(F, 10), bd=0, highlightthickness=1,
+                             highlightbackground="#D3DEE0", highlightcolor=TEAL,
+                             selectbackground=TEAL, selectforeground=WHITE,
+                             activestyle="none", exportselection=False)
+        sb = ttk.Scrollbar(box, orient="vertical", command=self.lb.yview)
+        self.lb.configure(yscrollcommand=sb.set)
+        self.lb.pack(side="left", fill="both", expand=True)
+        sb.pack(side="right", fill="y")
+ 
+        row = tk.Frame(g, bg=WHITE)
+        row.pack(fill="x", pady=(10, 0))
+        row.grid_columnconfigure(0, weight=1)
+        tk.Label(row, text="Name", bg=WHITE, fg=MUTED, font=(F, 9)).grid(row=0, column=0, sticky="w")
+        tk.Label(row, text="Price (₱)", bg=WHITE, fg=MUTED, font=(F, 9)).grid(row=0, column=1, sticky="w", padx=(8, 0))
+        self.a_name = ttk.Entry(row)
+        self.a_name.grid(row=1, column=0, sticky="ew")
+        self.a_price = ttk.Entry(row, width=10)
+        self.a_price.grid(row=1, column=1, padx=(8, 0))
+        btn(row, "Add", self.add_addon, TEAL, height=34).grid(row=1, column=2, padx=(8, 0))
+        btn(g, "Remove selected", self.remove_addon, "#FCEDEA", DANGER, height=34).pack(fill="x", pady=(8, 0))
+        self.items = []
+ 
+    def refresh(self):
+        for entry, val in ((self.vat, f"{VAT * 100:g}"),
+                           (self.weekend, f"{(WEEKEND_MULT - 1) * 100:g}"),
+                           (self.keep, str(BACKUP_KEEP))):
+            entry.delete(0, "end")
+            entry.insert(0, val)
+        self.method_var.set(DEFAULT_METHOD)
+        self.load_addons()
+ 
+    def load_addons(self):
+        self.items = q("SELECT * FROM addons ORDER BY name")
+        self.lb.delete(0, "end")
+        for a in self.items:
+            self.lb.insert("end", f"{a['name']}   -   {money(a['price'])}")
+ 
+    def add_addon(self):
+        name = self.a_name.get().strip()
+        try:
+            price = float(self.a_price.get())
+        except ValueError:
+            messagebox.showwarning("Price", "Price must be a number.", parent=self)
+            return
+        if not name or price <= 0:
+            messagebox.showwarning("Add-on", "Enter a name and a price above zero.", parent=self)
+            return
+        for a in self.items:
+            if a["name"].lower() == name.lower():
+                messagebox.showwarning("Duplicate", f"'{a['name']}' is already in the list.", parent=self)
+                break
+        else:                                   # no break happened: no duplicate, safe to add
+            ex("INSERT INTO addons(name,price) VALUES(?,?)", (name, price))
+            backups.log_action(LOG_PATH, self.app.username, f"Added add-on '{name}' at {money(price)}")
+            self.a_name.delete(0, "end")
+            self.a_price.delete(0, "end")
+            self.load_addons()
+ 
+    def remove_addon(self):
+        sel = self.lb.curselection()
+        if not sel:
+            messagebox.showinfo("Select", "Select an add-on first.", parent=self)
+            return
+        i = sel[0]
+        a = self.items[i]
+        if not confirm_delete(self, "add-on", f"Remove '{a['name']}' from the price list? "
+                                              "Past bookings that used it keep their charges."):
+            return
+        ex("DELETE FROM addons WHERE id=?", (a["id"],))
+        backups.log_action(LOG_PATH, self.app.username, f"Removed add-on '{a['name']}'")
+        self.lb.delete(i)
+        del self.items[i]                       # keep the list in step with the Listbox
+ 
+    def save(self):
+        try:
+            vat = float(self.vat.get())
+            weekend = float(self.weekend.get())
+            keep = int(self.keep.get())
+        except ValueError:
+            messagebox.showwarning("Invalid", "VAT and surcharge must be numbers, and the number "
+                                              "of backups must be a whole number.", parent=self)
+            return
+        else:                                   # runs only when every conversion above worked
+            if not (0 <= vat <= 50 and 0 <= weekend <= 100 and 1 <= keep <= 30):
+                messagebox.showwarning("Out of range", "VAT must be 0-50%, the surcharge 0-100%, "
+                                                       "and backups 1-30.", parent=self)
+                return
+        for key, val in (("vat", vat), ("weekend", weekend), ("keep", keep),
+                         ("pay_method", self.method_var.get())):
+            ex("INSERT OR REPLACE INTO settings(key,value) VALUES(?,?)", (key, str(val)))
+        load_settings()
+        backups.log_action(LOG_PATH, self.app.username,
+                           f"Changed settings: VAT {vat:g}%, weekend {weekend:g}%, keep {keep} backups, "
+                           f"default payment {self.method_var.get()}")
+        messagebox.showinfo("Saved", "Settings saved. New prices use them straight away.", parent=self)
 
 # ============================================================ main window
 class App(tk.Tk):
@@ -3676,7 +3931,7 @@ class App(tk.Tk):
                ("hk", "🧹   Housekeeping", HousekeepingPage)]
         if self.role == "admin":
             nav += [("promo", "🏷   Promo Codes", PromoPage), ("staff", "🔑   Staff", StaffPage),
-                    ("rep", "📈   Reports", ReportsPage)]
+                    ("rep", "📈   Reports", ReportsPage), ("settings", "⚙   Settings", SettingsPage)]
         self.pages, self.nav = {}, {}
         for key, label, cls in nav:
             if key in ("dash", "promo"):
@@ -3745,5 +4000,6 @@ def start():
 
 if __name__ == "__main__":
     init_db()
+    load_settings()
     migrate_image_paths()      # converts your existing rows to filenames
     start()

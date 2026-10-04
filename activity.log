@@ -1,0 +1,9 @@
+2026-10-04 08:32:31 | admin | Backed up database to resort_20261004_083231.db
+2026-10-04 08:35:22 | admin | Backed up database to resort_20261004_083522.db
+2026-10-04 08:36:04 | admin | Checked in RB-00052 (Ryan Aquino)
+2026-10-04 08:54:33 | admin | Restored database from resort_20261004_083522.db (safety copy: safety_20261004_085433.db)
+2026-10-04 09:40:22 | admin | Changed settings: VAT 12%, weekend 15%, keep 5 backups, default payment Card
+2026-10-04 09:40:34 | admin | Backed up database to resort_20261004_094034.db
+2026-10-04 09:40:40 | admin | Backed up database to resort_20261004_094039.db
+2026-10-04 09:40:43 | admin | Backed up database to resort_20261004_094043.db
+2026-10-04 09:40:52 | admin | Backed up database to resort_20261004_094052.db
