@@ -19,6 +19,7 @@ import random
 import calendar as pycal
 import datetime as dt
 import uuid
+import sys, os
 import time
 import tkinter as tk
 import tkinter.font as tkfont
@@ -34,15 +35,29 @@ from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 
 matplotlib.rcParams["font.family"] = ["Segoe UI", "Arial", "DejaVu Sans"]
 
+def resource_path(relative_path):
+    """Read-only bundled files (logos, slides)."""
+    base = getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__)))
+    return os.path.join(base, relative_path)
+
+def app_path(relative_path):
+    """Writable files that must persist (db, backups, exports, log, room photos)."""
+    if getattr(sys, "frozen", False):
+        base = os.path.dirname(sys.executable)
+    else:
+        base = os.path.dirname(os.path.abspath(__file__))
+    return os.path.join(base, relative_path)
+
 # ============================================================ config / theme
-BASE = os.path.dirname(os.path.abspath(__file__))
-IMG_DIR = os.path.join(BASE, "resort_images")
-ASSETS_DIR = os.path.join(BASE, "assets") 
-DB_PATH = os.path.join(BASE, "resort.db")
-BACKUP_DIR = os.path.join(BASE, "backups")
-EXPORT_DIR = os.path.join(BASE, "exports")
-LOG_PATH = os.path.join(BASE, "activity.log")
+BASE = app_path("")
+IMG_DIR = app_path("resort_images")      # writable: staff can upload room photos
+ASSETS_DIR = resource_path("assets")     # read-only: bundled inside the app
+DB_PATH = app_path("resort.db")
+BACKUP_DIR = app_path("backups")
+EXPORT_DIR = app_path("exports")
+LOG_PATH = app_path("activity.log")
 os.makedirs(IMG_DIR, exist_ok=True)
+os.makedirs(BACKUP_DIR, exist_ok=True)
 
 RESORT = "The Cove RESORT"
 LOGO_PATH = os.path.join(ASSETS_DIR, "logo.png")  
@@ -222,6 +237,7 @@ def style_titlebar(win, bg=OCEAN, fg=WHITE):
             ctypes.windll.dwmapi.DwmSetWindowAttribute(hwnd, attr, ctypes.byref(c), ctypes.sizeof(c))
     except Exception:
         pass
+
 
 # ============================================================ pictures
 THEMES = {  # sky top, sky bottom, sea, sand
@@ -407,18 +423,47 @@ def init_db():
             "Overwater Bungalow": (2, 15500, "Stay above the crystal-clear lagoon with a glass floor panel.",
                                    "Glass floor • Sun deck • Jacuzzi • Breakfast"),
         }
-        layout = [("101", "Garden Room"), ("102", "Garden Room"), ("103", "Garden Room"),
-                  ("201", "Deluxe Sea View"), ("202", "Deluxe Sea View"), ("203", "Deluxe Sea View"),
-                  ("301", "Family Cottage"), ("302", "Family Cottage"),
-                  ("401", "Pool Villa"), ("402", "Pool Villa"),
-                  ("501", "Overwater Bungalow"), ("502", "Overwater Bungalow")]
-        for num, t in layout:
+        
+        layout = [
+            ("101", "Garden Room", "gardenroom_101"),
+            ("102", "Garden Room", "gardenroom_102"),
+            ("103", "Garden Room", "gardenroom_103"),
+            ("201", "Deluxe Sea View", "deluxeseaview_201"),
+            ("202", "Deluxe Sea View", "deluxeseaview_202"),
+            ("203", "Deluxe Sea View", "deluxeseaview_203"),
+            ("301", "Family Cottage", "cottageroom_301"),
+            ("302", "Family Cottage", "cottageroom_302"),
+            ("401", "Pool Villa", "poolvilla_401"),
+            ("402", "Pool Villa", "poolvilla_402"),
+            ("501", "Overwater Bungalow", "overwater_501"),
+            ("502", "Overwater Bungalow", "overwater_502"),
+        ]
+
+        for num, t, image_name in layout:
             cap, rate, desc, am = info[t]
-            p = os.path.join(IMG_DIR, slug(t) + ".png")
-            if not os.path.exists(p):
-                make_scene(t, t, p)
-            conn.execute("INSERT INTO rooms(number,name,capacity,rate,description,amenities,image) "
-                         "VALUES(?,?,?,?,?,?,?)", (num, t, cap, rate, desc, am, os.path.basename(p)))
+
+            # Find the uploaded image regardless of its extension
+            p = next(
+                (
+                    os.path.join(IMG_DIR, image_name + ext)
+                    for ext in (".jpg", ".jpeg", ".png", ".webp", ".jfif")
+                    if os.path.exists(os.path.join(IMG_DIR, image_name + ext))
+                ),
+                None
+            )
+
+            if p is None:
+                print(f"Image not found: {image_name}")
+                p = os.path.join(IMG_DIR, slug(t) + ".png")
+                if not os.path.exists(p):
+                    make_scene(t, t, p)
+
+            conn.execute(
+                "INSERT INTO rooms(number,name,capacity,rate,description,amenities,image) "
+                "VALUES(?,?,?,?,?,?,?)",
+                (num, t, cap, rate, desc, am, os.path.basename(p))
+            )
+
         conn.commit()
 
     try:
@@ -4109,8 +4154,8 @@ class SettingsPage(Page):
         self.cwd_lbl = tk.Label(g, text="", bg=SEAFOAM, fg=INK, font=("Consolas", 8), anchor="w",
                                 justify="left", wraplength=380, padx=8, pady=6)
         self.cwd_lbl.pack(fill="x", pady=(2, 6))
-        tk.Label(g, text=r"CSV exports go to  ...\wip\exports", bg=WHITE, fg=MUTED,
-                font=(F, 8), anchor="w").pack(fill="x")            # raw string: backslashes stay as typed
+        tk.Label(g, text="CSV exports go to the 'exports' folder next to the app", bg=WHITE, fg=MUTED,
+                                font=(F, 8), anchor="w").pack(fill="x")          # raw string: backslashes stay as typed
         self.mod_lbl = tk.Label(g, text="", bg=WHITE, fg=MUTED, font=(F, 8), anchor="w",
                                 justify="left", wraplength=380)
         self.mod_lbl.pack(fill="x", pady=(4, 6))
@@ -4175,7 +4220,6 @@ class SettingsPage(Page):
         self.cwd_lbl.config(text=os.getcwd())
         names = [n for n in dir(backups) if not n.startswith("_") and callable(getattr(backups, n))]
         self.mod_lbl.config(text="backup_tools has: " + ", ".join(names))     # dir() lists a module's names
-        self.refresh_storage()
 
     def make_exports(self):
         try:
